@@ -4,26 +4,26 @@
 
 GitHub `dev` is the central source of truth for tracked application code.
 
-DEV uses a safe two-way Git workflow:
+DEV uses a safe two-way Git workflow on the workstation and an automatic one-way deployment from GitHub to VPS DEV:
 
 ```text
 LOCAL DEV
   <-> origin/dev
-        -> Deploy Goliath validates and deploys VPS DEV
+        -> Sync Goliath (automatic)
+             -> VPS DEV
 ```
 
 BETA and PRODUCTION do **not** automatically follow DEV.
 
-When a deliberate promotion is required, run the GitHub Actions workflow **Sync Goliath Environments** manually. That manual action takes the current `origin/dev` commit and applies it to:
+When a deliberate promotion is required, run **Deploy Goliath** manually and select either `beta` or `production`.
 
 ```text
-origin/beta
-origin/production
-VPS BETA
-VPS PRODUCTION
+origin/dev
+   -> Deploy Goliath -> origin/beta       -> VPS BETA
+   -> Deploy Goliath -> origin/production -> VPS PRODUCTION
 ```
 
-Direct VPS DEV source edits are only persistent when they are committed and pushed back to `origin/dev`. Uncommitted VPS edits can be replaced by the deployment reset and must not be treated as canonical source.
+Direct VPS DEV source edits are not canonical. Sync Goliath refuses to overwrite dirty tracked files outside `src/runtime`, so source changes should be committed on local DEV and pushed to `origin/dev` instead.
 
 Runtime data is intentionally NOT synchronised between environments.
 
@@ -51,7 +51,7 @@ goliath-beta
 goliath-production
 ```
 
-The deployment workflows reload the correct PM2 process after a checkout is updated and verify that the process is online, has the correct working directory and is running the correct `BOT_MODE`.
+Sync Goliath and Deploy Goliath reload the correct PM2 process after a checkout is updated and verify the final Git commit and working directory.
 
 ## Sync local DEV before working
 
@@ -67,7 +67,19 @@ The command safely synchronises local DEV and GitHub DEV in either fast-forward 
 - if local DEV is ahead, the command pushes DEV through the normal pre-push validation hook;
 - if both sides diverged, it stops rather than overwriting either side.
 
-It does not change local, GitHub, or VPS BETA/PRODUCTION.
+It does not change BETA or PRODUCTION.
+
+## Automatic local DEV watcher
+
+The optional workstation watcher can keep a clean local DEV checkout aligned with `origin/dev`:
+
+```bash
+npm run sync:dev:install
+```
+
+That installs the Windows logon task. The watcher checks every 30 seconds by default, fast-forwards when GitHub is ahead, pushes when local DEV is ahead, and refuses diverged or dirty states.
+
+The interval can be overridden with `GOLIATH_DEV_SYNC_INTERVAL_MS`. Values below 10 seconds are clamped to 10 seconds and invalid values fall back to 30 seconds.
 
 ## Normal DEV workflow
 
@@ -89,6 +101,8 @@ npm run sync:dev
 
 A normal `git push origin dev` remains supported. The tracked pre-push hook runs validation only; it does not move BETA or PRODUCTION refs.
 
+Every successful push to `origin/dev` automatically triggers **Sync Goliath**, which aligns `/home/goliath/dev` to that exact DEV commit while preserving `src/runtime/dev`, rebuilds the dashboard, synchronises commands, restarts `goliath-dev`, and verifies the final SHA.
+
 `package.json` configures `.githooks` through the npm `prepare` script.
 
 If hooks are not active on a fresh clone, run once:
@@ -98,39 +112,49 @@ npm install
 git config core.hooksPath .githooks
 ```
 
-## Manual BETA + PRODUCTION promotion
+## Manual BETA or PRODUCTION promotion
 
-Use **Actions -> Sync Goliath Environments -> Run workflow** only when BETA and PRODUCTION should receive the current DEV source.
+Use **Actions -> Deploy Goliath -> Run workflow** and select exactly one target:
 
-The workflow deliberately:
+```text
+beta
+production
+```
 
-1. resolves the current `origin/dev` commit;
-2. aligns `origin/beta` and `origin/production` to that commit;
-3. deploys the same commit to `/home/goliath/beta` and `/home/goliath/production`;
-4. runs doctor/build/command sync;
-5. reloads `goliath-beta` and `goliath-production`;
-6. verifies the final commit/tree and PM2 environment.
+Deploy Goliath deliberately:
+
+1. checks out and validates current `origin/dev`;
+2. creates a promotion commit on the selected target branch using the DEV application tree;
+3. deploys that promoted commit to the matching VPS checkout;
+4. preserves that environment's runtime directory;
+5. runs doctor/build/command sync;
+6. reloads the matching PM2 process;
+7. verifies the selected GitHub branch, VPS checkout and PM2 working directory match.
+
+BETA and PRODUCTION are independent manual promotions. Deploying BETA does not automatically deploy PRODUCTION, and deploying PRODUCTION does not require promoting from BETA.
 
 ## What each successful operation proves
 
 A successful `npm run sync:dev` proves local DEV and `origin/dev` match at that moment.
 
-A successful **Deploy Goliath** DEV run proves the selected DEV commit was validated and deployed to VPS DEV.
+A successful **Sync Goliath** run proves the triggering GitHub DEV commit was deployed and verified on VPS DEV.
 
-A successful manually triggered **Sync Goliath Environments** run proves BETA and PRODUCTION were deliberately aligned and deployed to the DEV snapshot selected at the start of that manual run.
+A successful **Deploy Goliath -> beta** run proves the validated DEV application tree was promoted to `origin/beta` and deployed to VPS BETA.
+
+A successful **Deploy Goliath -> production** run proves the validated DEV application tree was promoted to `origin/production` and deployed to VPS PRODUCTION.
 
 The environments can and should still have different runtime data, Discord guilds, tokens, `.env` files and moderation databases.
 
 ## Manual promotion commands
 
-These remain available for recovery or deliberate manual operation:
+These remain available for recovery or deliberate local operation:
 
 ```bash
 npm run promote:beta
 npm run promote:production
 ```
 
-The normal promotion path is the manually triggered **Sync Goliath Environments** workflow so GitHub refs, VPS deployments, dashboard, commands and PM2 are handled together.
+The normal full promotion path is **Deploy Goliath** because it handles the GitHub target branch, VPS deployment, dashboard, commands and PM2 verification together.
 
 ## Important
 
