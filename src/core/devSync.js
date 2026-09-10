@@ -77,4 +77,4 @@ console.log(`   Local DEV:    ${localSha}`);
 console.log(`   GitHub DEV:   ${remoteSha}`);
 console.log(`   Tracked tree: ${treeSha}`);
 console.log('');
-console.log('GitHub Actions will deploy DEV to VPS DEV automatically. BETA and PRODUCTION remain unchanged until Sync Goliath Environments is run manually.');
+console.log('Sync Goliath will align GitHub DEV to VPS DEV automatically. BETA and PRODUCTION remain unchanged until Deploy Goliath is run manually for the selected environment.');

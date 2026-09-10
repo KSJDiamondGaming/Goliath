@@ -1,4 +1,5 @@
 name: Deploy Goliath
+run-name: Deploy Goliath → ${{ inputs.environment }}
 
 on:
   workflow_dispatch:

@@ -9,8 +9,9 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
   exit 0
 fi
 
-# DEV pushes stay scoped to DEV. BETA and PRODUCTION are promoted only by the
-# manually triggered Sync Goliath Environments workflow.
+# DEV pushes stay scoped to DEV. GitHub DEV is synchronised to VPS DEV by the
+# automatic Sync Goliath workflow. BETA and PRODUCTION are promoted only by the
+# manually triggered Deploy Goliath workflow.
 while read -r local_ref local_sha remote_ref remote_sha; do
   :
 done

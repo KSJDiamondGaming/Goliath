@@ -4,12 +4,6 @@ on:
   push:
     branches:
       - dev
-    paths-ignore:
-      - '.github/workflows/deploy-dev.yml'
-      - '.github/workflows/sync-dev-now.yml'
-      - '.github/workflows/*-once.yml'
-      - 'scripts/*-once.js'
-      - 'scripts/*-temp.js'
 
 permissions:
   contents: read
@@ -107,6 +101,17 @@ jobs:
             rm -rf dist
             npx vite build src/dashboard --outDir ../../dist --emptyOutDir --logLevel warn
 
+            # DEV nginx serves the dashboard as static files. Give the standalone
+            # Appeals SPA route a concrete static entry so /appeals works even if
+            # the active nginx server block has no generic SPA try_files fallback.
+            mkdir -p dist/appeals
+            cp dist/index.html dist/appeals/index.html
+
+            grep -q 'GOLIATH_APPEALS_ENTRY_V2' dist/assets/*.js || {
+              echo "Appeals frontend marker missing from DEV bundle." >&2
+              exit 1
+            }
+
             NGINX_DUMP="$(nginx -T 2>&1)"
             DASHBOARD_ROOT="$(printf '%s\n' "$NGINX_DUMP" | awk -v host="$DEV_HOST" '
               $1 == "server_name" {
@@ -140,8 +145,8 @@ jobs:
             mkdir -p "$DASHBOARD_ROOT"
             cp -a dist/. "$DASHBOARD_ROOT/"
 
-            grep -q 'GOLIATH_APPEALS_ENTRY_V2' "$DASHBOARD_ROOT"/assets/*.js || {
-              echo "Appeals frontend marker missing from deployed DEV bundle." >&2
+            [ -f "$DASHBOARD_ROOT/appeals/index.html" ] || {
+              echo "Appeals static entry was not deployed." >&2
               exit 1
             }
 
@@ -163,19 +168,58 @@ jobs:
 
             FINAL_SHA="$(git rev-parse HEAD)"
             REMOTE_SHA="$(git rev-parse origin/dev)"
-            [ "$FINAL_SHA" = "$EXPECTED_SHA" ]
-            [ "$FINAL_SHA" = "$REMOTE_SHA" ]
+            [ "$FINAL_SHA" = "$EXPECTED_SHA" ] || {
+              echo "DEV checkout verification failed: $FINAL_SHA != $EXPECTED_SHA" >&2
+              exit 1
+            }
+            [ "$FINAL_SHA" = "$REMOTE_SHA" ] || {
+              echo "DEV VPS/GitHub mismatch: $FINAL_SHA != $REMOTE_SHA" >&2
+              exit 1
+            }
 
             PID="$(pm2 pid "$PM2_NAME" 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
-            [ -n "$PID" ] && [ "$PID" != "0" ]
+            [ -n "$PID" ] && [ "$PID" != "0" ] || {
+              echo "PM2 process $PM2_NAME is not running." >&2
+              exit 1
+            }
             PROCESS_CWD="$(readlink -f "/proc/$PID/cwd")"
-            [ "$PROCESS_CWD" = "$APP_DIR" ]
+            [ "$PROCESS_CWD" = "$APP_DIR" ] || {
+              echo "PM2 cwd mismatch: $PROCESS_CWD != $APP_DIR" >&2
+              exit 1
+            }
+
+            PUBLIC_STATUS="$(curl -ksS -o /dev/null -w '%{http_code}' "https://$DEV_HOST/api/auth/me" || true)"
+            DIRECT_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3001/api/auth/me" || true)"
+            case "$DIRECT_STATUS" in
+              200|401) ;;
+              *) echo "Direct DEV backend health check failed with HTTP $DIRECT_STATUS" >&2; exit 1 ;;
+            esac
+            case "$PUBLIC_STATUS" in
+              200|401) ;;
+              *) echo "Public DEV backend health check failed with HTTP $PUBLIC_STATUS" >&2; exit 1 ;;
+            esac
+
+            APPEALS_BODY="$(mktemp)"
+            trap 'rm -f "$APPEALS_BODY"; sync_cleanup' EXIT
+            APPEALS_STATUS="$(curl -ksSL -o "$APPEALS_BODY" -w '%{http_code}' "https://$DEV_HOST/appeals" || true)"
+            [ "$APPEALS_STATUS" = "200" ] || {
+              echo "Public DEV Appeals page failed with HTTP $APPEALS_STATUS" >&2
+              exit 1
+            }
+            grep -Eq '<div[^>]+id=["'\'' ]root["'\'' ]' "$APPEALS_BODY" || grep -q 'id="root"' "$APPEALS_BODY" || {
+              echo "Public DEV Appeals page did not return the dashboard entry document." >&2
+              exit 1
+            }
+            rm -f "$APPEALS_BODY"
+            trap sync_cleanup EXIT
 
             echo "✅ DEV synchronized"
             echo "   GitHub dev:     $REMOTE_SHA"
             echo "   DEV VPS:        $FINAL_SHA"
             echo "   Dashboard root: $DASHBOARD_ROOT"
             echo "   PM2:            $PM2_NAME"
+            echo "   Backend HTTP:   public=$PUBLIC_STATUS direct=$DIRECT_STATUS"
+            echo "   Appeals HTTP:   $APPEALS_STATUS"
 
             restore_runtime
             rm -rf "$BACKUP_DIR"
