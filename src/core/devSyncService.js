@@ -4,7 +4,10 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..', '..');
-const intervalMs = Math.max(10000, Number(process.env.GOLIATH_DEV_SYNC_INTERVAL_MS || 30000));
+const configuredIntervalMs = Number(process.env.GOLIATH_DEV_SYNC_INTERVAL_MS || 30000);
+const intervalMs = Number.isFinite(configuredIntervalMs)
+  ? Math.max(10000, configuredIntervalMs)
+  : 30000;
 let running = false;
 let lastState = '';
 
@@ -14,6 +17,15 @@ function git(args, capture = true) {
     encoding: 'utf8',
     stdio: capture ? 'pipe' : 'inherit',
   });
+
+  if (result.error) {
+    return {
+      ok: false,
+      out: '',
+      err: result.error.message,
+    };
+  }
+
   return {
     ok: result.status === 0,
     out: String(result.stdout || '').trim(),
@@ -39,7 +51,7 @@ function syncOnce() {
 
     const dirty = git(['status', '--porcelain']);
     if (!dirty.ok) {
-      sayOnce('status-error', '⚠️ DEV auto-sync could not read git status.');
+      sayOnce('status-error', `⚠️ DEV auto-sync could not read git status: ${dirty.err || 'unknown error'}`);
       return;
     }
     if (dirty.out) {
@@ -90,6 +102,8 @@ function syncOnce() {
       const nowRemote = git(['rev-parse', 'origin/dev']);
       if (refresh.ok && nowRemote.ok && nowRemote.out === local.out) {
         sayOnce(`pushed:${local.out}`, `✅ Local DEV pushed to GitHub DEV: ${local.out}`);
+      } else {
+        sayOnce('push-verify-error', '⚠️ DEV auto-sync push completed but origin/dev verification did not match local DEV.');
       }
       return;
     }
@@ -100,6 +114,9 @@ function syncOnce() {
   }
 }
 
+if (!Number.isFinite(configuredIntervalMs)) {
+  console.warn('⚠️ Invalid GOLIATH_DEV_SYNC_INTERVAL_MS; using 30000ms.');
+}
 console.log(`Goliath DEV auto-sync service started. Interval: ${intervalMs / 1000}s`);
 syncOnce();
 setInterval(syncOnce, intervalMs);
