@@ -7,7 +7,7 @@ import Appeals from './pages/moderation/Appeals';
 
 window.__GOLIATH_APPEALS_ENTRY_V2__ = 'GOLIATH_APPEALS_ENTRY_V2';
 window.__GOLIATH_DEV_ROOT_VERIFIED__ = true;
-window.__GOLIATH_APPEALS_OAUTH_RECOVERY__ = 'v6';
+window.__GOLIATH_APPEALS_OAUTH_RECOVERY__ = 'v7';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
@@ -31,13 +31,13 @@ function getAppealReference() {
   return null;
 }
 
-function getOAuthAppealCookie() {
+function getOAuthAppealReturn() {
   const match = document.cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('goliath_oauth_return='));
   if (!match) return null;
   try {
     const value = decodeURIComponent(match.slice('goliath_oauth_return='.length));
-    if (!value.startsWith('/appeals')) return null;
-    return parseAppealReference(value);
+    if (value !== '/appeals' && !value.startsWith('/appeals?')) return null;
+    return { path: '/appeals', reference: parseAppealReference(value) };
   } catch {
     return null;
   }
@@ -45,13 +45,15 @@ function getOAuthAppealCookie() {
 
 let pathname = window.location.pathname.replace(/\/+$/, '') || '/';
 let appealReference = getAppealReference();
+let oauthAppealReturn = null;
 
-if (!appealReference && (pathname === '/overview' || pathname === '/')) {
-  appealReference = getOAuthAppealCookie();
+if (pathname === '/overview' || pathname === '/') {
+  oauthAppealReturn = getOAuthAppealReturn();
+  if (!appealReference && oauthAppealReturn?.reference) appealReference = oauthAppealReturn.reference;
 }
 
 const isAppealsPath = pathname === '/appeals' || pathname.endsWith('/appeals');
-const isRecoveredAppealPath = Boolean(appealReference) && (pathname === '/overview' || pathname === '/');
+const isRecoveredAppealPath = Boolean(oauthAppealReturn) && (pathname === '/overview' || pathname === '/');
 
 if ((isAppealsPath || isRecoveredAppealPath) && pathname !== '/appeals') {
   const params = new URLSearchParams();
