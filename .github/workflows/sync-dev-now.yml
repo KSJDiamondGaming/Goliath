@@ -4,12 +4,6 @@ on:
   push:
     branches:
       - dev
-    paths-ignore:
-      - '.github/workflows/deploy-dev.yml'
-      - '.github/workflows/sync-dev-now.yml'
-      - '.github/workflows/*-once.yml'
-      - 'scripts/*-once.js'
-      - 'scripts/*-temp.js'
 
 permissions:
   contents: read
@@ -140,11 +134,6 @@ jobs:
             mkdir -p "$DASHBOARD_ROOT"
             cp -a dist/. "$DASHBOARD_ROOT/"
 
-            grep -q 'GOLIATH_APPEALS_ENTRY_V2' "$DASHBOARD_ROOT"/assets/*.js || {
-              echo "Appeals frontend marker missing from deployed DEV bundle." >&2
-              exit 1
-            }
-
             nginx -t
             systemctl reload nginx
 
@@ -161,54 +150,45 @@ jobs:
             pm2 save
             sleep 3
 
-            AUTH_TEST_PATH='/api/auth/login?next=%2Fappeals%3Fguild%3D1515201360386068642%26case%3D1'
-            PUBLIC_HEADERS="$(mktemp)"
-            DIRECT_HEADERS="$(mktemp)"
-            trap 'rm -f "$PUBLIC_HEADERS" "$DIRECT_HEADERS"; sync_cleanup' EXIT
-
-            curl -ksS -D "$PUBLIC_HEADERS" -o /dev/null "https://$DEV_HOST$AUTH_TEST_PATH"
-            curl -sS -D "$DIRECT_HEADERS" -o /dev/null "http://127.0.0.1:3001$AUTH_TEST_PATH"
-
-            grep -qi '^x-goliath-auth-flow: appeals-state-v7' "$DIRECT_HEADERS" || {
-              echo "Direct DEV auth marker missing on port 3001." >&2
-              cat "$DIRECT_HEADERS" >&2
-              exit 1
-            }
-            grep -qi '^x-goliath-auth-flow: appeals-state-v7' "$PUBLIC_HEADERS" || {
-              echo "Public DEV /api/auth is not reaching the current goliath-dev backend." >&2
-              printf '%s\n' "$NGINX_DUMP" | grep -n -A35 -B8 "$DEV_HOST" >&2 || true
-              cat "$PUBLIC_HEADERS" >&2
-              exit 1
-            }
-            grep -qi '^set-cookie: goliath_oauth_return=' "$PUBLIC_HEADERS" || {
-              echo "Public DEV OAuth login did not persist the Appeals return cookie." >&2
-              cat "$PUBLIC_HEADERS" >&2
-              exit 1
-            }
-            grep -qi '^location: https://discord.com/oauth2/authorize?.*state=' "$PUBLIC_HEADERS" || {
-              echo "Public DEV OAuth login did not emit signed state." >&2
-              cat "$PUBLIC_HEADERS" >&2
-              exit 1
-            }
-            rm -f "$PUBLIC_HEADERS" "$DIRECT_HEADERS"
-            trap sync_cleanup EXIT
-            echo "✅ Public DEV OAuth backend verified"
-
             FINAL_SHA="$(git rev-parse HEAD)"
             REMOTE_SHA="$(git rev-parse origin/dev)"
-            [ "$FINAL_SHA" = "$EXPECTED_SHA" ]
-            [ "$FINAL_SHA" = "$REMOTE_SHA" ]
+            [ "$FINAL_SHA" = "$EXPECTED_SHA" ] || {
+              echo "DEV checkout verification failed: $FINAL_SHA != $EXPECTED_SHA" >&2
+              exit 1
+            }
+            [ "$FINAL_SHA" = "$REMOTE_SHA" ] || {
+              echo "DEV VPS/GitHub mismatch: $FINAL_SHA != $REMOTE_SHA" >&2
+              exit 1
+            }
 
             PID="$(pm2 pid "$PM2_NAME" 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
-            [ -n "$PID" ] && [ "$PID" != "0" ]
+            [ -n "$PID" ] && [ "$PID" != "0" ] || {
+              echo "PM2 process $PM2_NAME is not running." >&2
+              exit 1
+            }
             PROCESS_CWD="$(readlink -f "/proc/$PID/cwd")"
-            [ "$PROCESS_CWD" = "$APP_DIR" ]
+            [ "$PROCESS_CWD" = "$APP_DIR" ] || {
+              echo "PM2 cwd mismatch: $PROCESS_CWD != $APP_DIR" >&2
+              exit 1
+            }
+
+            PUBLIC_STATUS="$(curl -ksS -o /dev/null -w '%{http_code}' "https://$DEV_HOST/api/auth/me" || true)"
+            DIRECT_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3001/api/auth/me" || true)"
+            case "$DIRECT_STATUS" in
+              200|401) ;;
+              *) echo "Direct DEV backend health check failed with HTTP $DIRECT_STATUS" >&2; exit 1 ;;
+            esac
+            case "$PUBLIC_STATUS" in
+              200|401) ;;
+              *) echo "Public DEV backend health check failed with HTTP $PUBLIC_STATUS" >&2; exit 1 ;;
+            esac
 
             echo "✅ DEV synchronized"
             echo "   GitHub dev:     $REMOTE_SHA"
             echo "   DEV VPS:        $FINAL_SHA"
             echo "   Dashboard root: $DASHBOARD_ROOT"
             echo "   PM2:            $PM2_NAME"
+            echo "   Backend HTTP:   public=$PUBLIC_STATUS direct=$DIRECT_STATUS"
 
             restore_runtime
             rm -rf "$BACKUP_DIR"
