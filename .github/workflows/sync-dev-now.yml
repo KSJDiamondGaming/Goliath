@@ -101,6 +101,17 @@ jobs:
             rm -rf dist
             npx vite build src/dashboard --outDir ../../dist --emptyOutDir --logLevel warn
 
+            # DEV nginx serves the dashboard as static files. Give the standalone
+            # Appeals SPA route a concrete static entry so /appeals works even if
+            # the active nginx server block has no generic SPA try_files fallback.
+            mkdir -p dist/appeals
+            cp dist/index.html dist/appeals/index.html
+
+            grep -q 'GOLIATH_APPEALS_ENTRY_V2' dist/assets/*.js || {
+              echo "Appeals frontend marker missing from DEV bundle." >&2
+              exit 1
+            }
+
             NGINX_DUMP="$(nginx -T 2>&1)"
             DASHBOARD_ROOT="$(printf '%s\n' "$NGINX_DUMP" | awk -v host="$DEV_HOST" '
               $1 == "server_name" {
@@ -133,6 +144,11 @@ jobs:
             rm -rf "$DASHBOARD_ROOT"
             mkdir -p "$DASHBOARD_ROOT"
             cp -a dist/. "$DASHBOARD_ROOT/"
+
+            [ -f "$DASHBOARD_ROOT/appeals/index.html" ] || {
+              echo "Appeals static entry was not deployed." >&2
+              exit 1
+            }
 
             nginx -t
             systemctl reload nginx
@@ -183,12 +199,27 @@ jobs:
               *) echo "Public DEV backend health check failed with HTTP $PUBLIC_STATUS" >&2; exit 1 ;;
             esac
 
+            APPEALS_BODY="$(mktemp)"
+            trap 'rm -f "$APPEALS_BODY"; sync_cleanup' EXIT
+            APPEALS_STATUS="$(curl -ksSL -o "$APPEALS_BODY" -w '%{http_code}' "https://$DEV_HOST/appeals" || true)"
+            [ "$APPEALS_STATUS" = "200" ] || {
+              echo "Public DEV Appeals page failed with HTTP $APPEALS_STATUS" >&2
+              exit 1
+            }
+            grep -Eq '<div[^>]+id=["'\'' ]root["'\'' ]' "$APPEALS_BODY" || grep -q 'id="root"' "$APPEALS_BODY" || {
+              echo "Public DEV Appeals page did not return the dashboard entry document." >&2
+              exit 1
+            }
+            rm -f "$APPEALS_BODY"
+            trap sync_cleanup EXIT
+
             echo "✅ DEV synchronized"
             echo "   GitHub dev:     $REMOTE_SHA"
             echo "   DEV VPS:        $FINAL_SHA"
             echo "   Dashboard root: $DASHBOARD_ROOT"
             echo "   PM2:            $PM2_NAME"
             echo "   Backend HTTP:   public=$PUBLIC_STATUS direct=$DIRECT_STATUS"
+            echo "   Appeals HTTP:   $APPEALS_STATUS"
 
             restore_runtime
             rm -rf "$BACKUP_DIR"
