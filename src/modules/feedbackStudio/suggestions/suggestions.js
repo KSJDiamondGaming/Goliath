@@ -115,8 +115,9 @@ function calculateAnalytics(records = {}) {
 function normalizeSection(section = {}) {
   const base = defaultSuggestionsSection();
   const source = isPlainObject(section) ? section : {};
+  const canonicalStored = isPlainObject(source.suggestions) ? source.suggestions : {};
   const legacyStored = isPlainObject(source.items) ? source.items : {};
-  const stored = isPlainObject(source.suggestions) ? source.suggestions : legacyStored;
+  const stored = Object.keys(canonicalStored).length ? canonicalStored : legacyStored;
   const normalizedSuggestions = {};
 
   for (const [storedId, rawSuggestion] of Object.entries(stored)) {
