@@ -19,7 +19,7 @@ async function withSuggestionLock(guildId, suggestionId, operation) {
 }
 
 function assertEnabled(guildId) {
-  if (!guildId || !isModuleEnabled(guildId, 'suggestions')) throw new Error('Suggestions are currently turned off for this server.');
+  if (!guildId || !isModuleEnabled(guildId, 'suggestions')) throw new Error('Suggestions are currently paused for this server.');
   return suggestions.getSection(guildId);
 }
 
@@ -69,7 +69,7 @@ async function submitSuggestion(interaction, panel) {
     const channel = await resolveSendableChannel(interaction.guild, targetId, 'suggestions channel', { requireHistory: true });
     const payload = await resolveSuggestionPayload(interaction.guild, {
       embeds: [panel.buildSuggestionEmbed(interaction.guild, draft, fresh)],
-      components: panel.buildSuggestionRows(draft, fresh),
+      components: panel.buildSuggestionRows(draft, fresh, true),
     });
     const message = await channel.send(payload);
 
@@ -95,9 +95,10 @@ async function refreshSuggestionMessage(guild, suggestionId, panel) {
   const channel = guild.channels.cache.get(suggestion.channelId) || await guild.channels.fetch(suggestion.channelId).catch(() => null);
   const message = await channel?.messages?.fetch(suggestion.messageId).catch(() => null);
   if (!message?.editable) return null;
+  const enabled = isModuleEnabled(guild.id, 'suggestions');
   const payload = await resolveSuggestionPayload(guild, {
     embeds: [panel.buildSuggestionEmbed(guild, suggestion, section)],
-    components: panel.buildSuggestionRows(suggestion, section),
+    components: panel.buildSuggestionRows(suggestion, section, enabled),
   });
   await message.edit(payload);
   return suggestion;
@@ -111,6 +112,19 @@ async function bestEffortRefresh(guild, suggestionId, panel) {
   }
 }
 
+async function refreshPendingSuggestions(guild, panel) {
+  if (!guild?.id) return 0;
+  const section = suggestions.getSection(guild.id);
+  const pendingIds = Object.values(section.suggestions || {})
+    .filter((item) => item?.status === 'pending' && item.suggestionId)
+    .map((item) => item.suggestionId);
+
+  for (const suggestionId of pendingIds) {
+    await bestEffortRefresh(guild, suggestionId, panel);
+  }
+  return pendingIds.length;
+}
+
 async function vote(interaction, suggestionId, direction, panel) {
   if (!['up', 'down'].includes(direction)) throw new Error('That vote option is unavailable.');
   const guildId = interaction?.guildId;
@@ -120,7 +134,7 @@ async function vote(interaction, suggestionId, direction, panel) {
 
   return withSuggestionLock(guildId, id, async () => {
     const section = assertEnabled(guildId);
-    if (section.voting === false) throw new Error('Voting is currently turned off.');
+    if (section.voting === false) throw new Error('Community voting is currently turned off.');
     const current = suggestions.getSuggestion(guildId, id);
     if (!current) throw new Error('That suggestion could not be found.');
     if (current.status !== 'pending') throw new Error('Voting has closed for this suggestion.');
@@ -146,16 +160,32 @@ async function vote(interaction, suggestionId, direction, panel) {
   });
 }
 
+function quotePreview(content, maxLength = 500) {
+  const text = String(content || '').trim().slice(0, maxLength);
+  return text ? `> ${text.replace(/\n/g, '\n> ')}` : '> Your suggestion';
+}
+
 async function notifyAuthor(guild, suggestion) {
   if (!guild || !suggestion?.authorId) return false;
   const member = await guild.members.fetch(suggestion.authorId).catch(() => null);
   if (!member?.user) return false;
 
-  const headline = suggestion.status === 'approved'
-    ? `💡 Good news — your suggestion in **${guild.name}** was approved.`
-    : `💡 Thanks for your suggestion in **${guild.name}**. The team decided not to approve it this time.`;
-  const note = suggestion.reviewReason ? `\n\n**Team response:** ${suggestion.reviewReason}` : '';
-  const content = await emojis.resolveText(guild.client, guild.id, `${headline}${note}`);
+  const approved = suggestion.status === 'approved';
+  const headline = approved
+    ? `💡 **Your suggestion in ${guild.name} was approved!**`
+    : `💡 **The team has reviewed your suggestion in ${guild.name}.**`;
+  const decision = approved
+    ? '✅ The team has decided to move forward with it.'
+    : '❌ The team has decided not to move forward with it this time.';
+  const note = suggestion.reviewReason
+    ? `\n\n**Team response**\n${suggestion.reviewReason}`
+    : '';
+  const privacy = suggestion.anonymous === true ? '\n\n🔒 You shared this suggestion anonymously.' : '';
+  const content = await emojis.resolveText(
+    guild.client,
+    guild.id,
+    `${headline}\n\n${quotePreview(suggestion.content)}\n\n${decision}${note}${privacy}\n\nYou can also see this decision in **My Suggestions**.`,
+  );
   return member.user.send(content).then(() => true).catch(() => false);
 }
 
@@ -220,6 +250,7 @@ module.exports = {
   resolveSendableChannel,
   submitSuggestion,
   refreshSuggestionMessage,
+  refreshPendingSuggestions,
   vote,
   review,
   notifyAuthor,
