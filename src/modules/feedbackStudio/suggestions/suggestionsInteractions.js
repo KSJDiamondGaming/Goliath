@@ -34,6 +34,15 @@ function withoutReplyFlags(payload = {}) {
   return rest;
 }
 
+async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestionMessages = false } = {}) {
+  if (panelMessage) await panel.refreshDeployedPanel(guild).catch((error) => {
+    console.warn('[Suggestions] Could not refresh the published suggestions panel:', error.message || error);
+  });
+  if (suggestionMessages) await tracking.refreshPendingSuggestions(guild, panel).catch((error) => {
+    console.warn('[Suggestions] Could not refresh pending suggestion messages:', error.message || error);
+  });
+}
+
 async function handleSuggestionsAdminInteraction(interaction) {
   const id = String(interaction?.customId || '');
   if (!id.startsWith('admin:suggestions')) return false;
@@ -83,15 +92,25 @@ async function handleSuggestionsAdminInteraction(interaction) {
         return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, page));
       }
     } else if (id === 'admin:suggestions:enable') {
+      await interaction.deferUpdate();
       setModuleEnabled(interaction.guild.id, 'suggestions', true, interaction.guild);
+      await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true, suggestionMessages: true });
     } else if (id === 'admin:suggestions:disable') {
+      await interaction.deferUpdate();
       setModuleEnabled(interaction.guild.id, 'suggestions', false, interaction.guild);
+      await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true, suggestionMessages: true });
     } else if (id === 'admin:suggestions:toggleVoting') {
+      await interaction.deferUpdate();
       save((section) => ({ ...section, voting: !section.voting }));
+      await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
     } else if (id === 'admin:suggestions:toggleReview') {
+      await interaction.deferUpdate();
       save((section) => ({ ...section, requireReview: !section.requireReview }));
+      await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
     } else if (id === 'admin:suggestions:toggleAnonymous') {
+      await interaction.deferUpdate();
       save((section) => ({ ...section, anonymous: !section.anonymous }));
+      await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true });
     } else if (id === 'admin:suggestions:deploy') {
       await interaction.deferUpdate();
       await panel.deploySubmitPanel(interaction.guild);
@@ -138,8 +157,12 @@ async function handleSuggestionsInteraction(interaction) {
 
     if (interaction.isModalSubmit?.() && interaction.customId === 'suggestions:modal:submit') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      await tracking.submitSuggestion(interaction, panel);
-      await interaction.editReply({ content: '✅ Thanks — your suggestion has been sent.' });
+      const saved = await tracking.submitSuggestion(interaction, panel);
+      await interaction.editReply({
+        content: saved.anonymous === true
+          ? '✅ Thanks — your suggestion has been shared anonymously.'
+          : '✅ Thanks — your suggestion has been shared.',
+      });
       return true;
     }
 
@@ -147,6 +170,24 @@ async function handleSuggestionsInteraction(interaction) {
       if (!suggestions.cleanSuggestionId(parts[2]) || !['up', 'down'].includes(parts[3])) throw new Error('That vote is no longer available.');
       await interaction.deferUpdate();
       await tracking.vote(interaction, parts[2], parts[3], panel);
+      return true;
+    }
+
+    if (interaction.isButton?.() && parts[1] === 'reviewOpen') {
+      const suggestionId = suggestions.cleanSuggestionId(parts[2]);
+      if (!suggestionId) throw new Error('That review option is no longer available.');
+      const section = tracking.assertEnabled(interaction.guildId);
+      if (!tracking.isReviewer(interaction.member, section)) throw new Error('Only the suggestion review team can use this button.');
+      const current = suggestions.getSuggestion(interaction.guildId, suggestionId);
+      if (!current) throw new Error('That suggestion could not be found.');
+      if (current.status !== 'pending') throw new Error(`This suggestion has already been ${current.status === 'approved' ? 'approved' : 'declined'}.`);
+      await interaction.reply(panel.buildReviewerDecisionPayload(interaction.guild, suggestionId));
+      return true;
+    }
+
+    if (interaction.isButton?.() && interaction.customId === 'suggestions:reviewClose') {
+      await interaction.deferUpdate();
+      await interaction.deleteReply().catch(() => null);
       return true;
     }
 
@@ -166,7 +207,11 @@ async function handleSuggestionsInteraction(interaction) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const reason = String(interaction.fields.getTextInputValue('reason') || '').trim();
       await tracking.review(interaction, parts[2], parts[3], panel, reason);
-      await interaction.editReply({ content: `✅ Suggestion ${parts[3] === 'approve' ? 'approved' : 'declined'}.` });
+      await interaction.editReply({
+        content: parts[3] === 'approve'
+          ? '✅ Approved. The suggestion is now closed and the decision has been saved.'
+          : '✅ Declined. The suggestion is now closed and the decision has been saved.',
+      });
       return true;
     }
 
