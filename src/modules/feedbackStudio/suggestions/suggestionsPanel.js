@@ -15,6 +15,7 @@ const {
 } = require('discord.js');
 const suggestions = require('./suggestions');
 const tracking = require('./suggestionsTracking');
+const embedTemplates = require('../../messageStudio/embed/embedTemplates');
 const { isModuleEnabled } = require('../../../core/guild/guildManager');
 const panelNavigation = require('../../../core/ui/panelNavigation');
 
@@ -46,12 +47,100 @@ function voteSummary(suggestion) {
   return `👍 **${suggestion.upVotes.length}** support   ·   👎 **${suggestion.downVotes.length}** not for me`;
 }
 
-function buildSuggestionEmbed(guild, suggestion, section) {
+function publicSuggestionAuthor(suggestion) {
+  if (suggestion?.anonymous === true) return '🔒 Anonymous member';
+  return suggestion?.authorId ? `<@${suggestion.authorId}>` : 'Community member';
+}
+
+function defaultTeamResponse(suggestion) {
+  if (suggestion?.reviewReason) return suggestion.reviewReason;
+  if (suggestion?.status === 'approved') return 'The team has approved this suggestion.';
+  if (suggestion?.status === 'denied') return 'The team has decided not to move forward with this suggestion.';
+  return '';
+}
+
+function templateVariables(guild, suggestion = null, section = {}) {
+  const now = new Date();
+  const icon = guild?.iconURL?.({ extension: 'png', size: 512 }) || '';
+  const banner = guild?.bannerURL?.({ extension: 'png', size: 1024 }) || '';
+  const memberCount = Number(guild?.memberCount || 0);
+  const enabled = guild?.id ? isModuleEnabled(guild.id, 'suggestions') : true;
+  const status = suggestion ? statusLabel(suggestion.status, section) : '';
+
+  return {
+    guild: guild?.name || 'Server',
+    guildName: guild?.name || 'Server',
+    server: guild?.name || 'Server',
+    serverName: guild?.name || 'Server',
+    guildId: guild?.id || '',
+    guildIcon: icon,
+    guildBanner: banner,
+    memberCount,
+    createdAt: discordTimestamp(now, 'F'),
+    timestamp: discordTimestamp(now, 'F'),
+    suggestion: suggestion?.content || '',
+    suggestionAuthor: suggestion ? publicSuggestionAuthor(suggestion) : '',
+    suggestionStatus: status,
+    upVotes: suggestion?.upVotes?.length || 0,
+    downVotes: suggestion?.downVotes?.length || 0,
+    teamResponse: suggestion ? defaultTeamResponse(suggestion) : '',
+    submittedAt: suggestion?.createdAt ? discordTimestamp(suggestion.createdAt, 'F') : '',
+    decisionAt: suggestion?.reviewedAt || suggestion?.updatedAt
+      ? discordTimestamp(suggestion.reviewedAt || suggestion.updatedAt, 'F')
+      : '',
+    suggestionsEnabled: enabled ? 'On' : 'Off',
+    anonymousMode: section.anonymous === true ? 'On' : 'Off',
+  };
+}
+
+function suggestionTemplateSlot(suggestion) {
+  if (suggestion?.status === 'approved') return 'suggestion_accepted';
+  if (suggestion?.status === 'denied') return 'suggestion_denied';
+  return 'suggestion_pending';
+}
+
+function renderSuggestionBinding(guild, slot, variables) {
+  if (!guild?.id) return null;
+  try {
+    return embedTemplates.renderBinding(guild.id, 'suggestions', slot, variables);
+  } catch (error) {
+    console.warn(`[Suggestions] Embed Studio template ${slot} could not be rendered:`, error.message || error);
+    return null;
+  }
+}
+
+function applyTemplateEmbed(rendered, fallbackEmbed, timestampValue = null) {
+  if (!rendered?.embed) return fallbackEmbed;
+  const source = rendered.embed;
+  const embed = new EmbedBuilder().setColor(SUGGESTIONS_COLOR);
+
+  if (source.title) embed.setTitle(source.title);
+  if (source.description) embed.setDescription(source.description);
+  if (Array.isArray(source.fields) && source.fields.length) embed.addFields(source.fields);
+  if (source.author?.name) {
+    const author = { name: source.author.name };
+    if (source.author.iconURL) author.iconURL = source.author.iconURL;
+    if (source.author.url) author.url = source.author.url;
+    embed.setAuthor(author);
+  }
+  if (source.footer?.text) {
+    const footer = { text: source.footer.text };
+    if (source.footer.iconURL) footer.iconURL = source.footer.iconURL;
+    embed.setFooter(footer);
+  }
+  if (source.thumbnailURL) embed.setThumbnail(source.thumbnailURL);
+  if (source.imageURL) embed.setImage(source.imageURL);
+  if (timestampValue) embed.setTimestamp(new Date(timestampValue));
+
+  return embed;
+}
+
+function defaultSuggestionEmbed(guild, suggestion, section) {
   const enabled = guild?.id ? isModuleEnabled(guild.id, 'suggestions') : true;
   const fields = [
     {
       name: 'Shared by',
-      value: suggestion.anonymous === true ? '🔒 Anonymous member' : suggestion.authorId ? `<@${suggestion.authorId}>` : 'Community member',
+      value: publicSuggestionAuthor(suggestion),
       inline: true,
     },
     {
@@ -67,13 +156,7 @@ function buildSuggestionEmbed(guild, suggestion, section) {
 
   if (suggestion.status !== 'pending') {
     fields.push({ name: 'Decision made', value: discordTimestamp(suggestion.reviewedAt || suggestion.updatedAt, 'R'), inline: true });
-    fields.push({
-      name: 'Team response',
-      value: suggestion.reviewReason || (suggestion.status === 'approved'
-        ? 'The team has approved this suggestion.'
-        : 'The team has decided not to move forward with this suggestion.'),
-      inline: false,
-    });
+    fields.push({ name: 'Team response', value: defaultTeamResponse(suggestion), inline: false });
   }
 
   const title = suggestion.status === 'approved'
@@ -96,6 +179,23 @@ function buildSuggestionEmbed(guild, suggestion, section) {
     .setTimestamp(new Date(suggestion.createdAt || Date.now()));
 }
 
+function buildSuggestionPresentation(guild, suggestion, section) {
+  const fallbackEmbed = defaultSuggestionEmbed(guild, suggestion, section);
+  const rendered = renderSuggestionBinding(
+    guild,
+    suggestionTemplateSlot(suggestion),
+    templateVariables(guild, suggestion, section),
+  );
+  return {
+    content: rendered?.content || undefined,
+    embed: applyTemplateEmbed(rendered, fallbackEmbed, suggestion.createdAt || Date.now()),
+  };
+}
+
+function buildSuggestionEmbed(guild, suggestion, section) {
+  return buildSuggestionPresentation(guild, suggestion, section).embed;
+}
+
 function buildSuggestionRows(suggestion, section, enabled = true) {
   const rows = [];
   if (!enabled || suggestion.status !== 'pending') return rows;
@@ -115,9 +215,16 @@ function buildSuggestionRows(suggestion, section, enabled = true) {
   return rows;
 }
 
-function buildSubmitPanelPayload(guildId) {
-  const section = suggestions.getSection(guildId);
-  const enabled = isModuleEnabled(guildId, 'suggestions');
+function buildSuggestionMessagePayload(guild, suggestion, section, enabled = true, includeComponents = true) {
+  const presentation = buildSuggestionPresentation(guild, suggestion, section);
+  return {
+    content: presentation.content || null,
+    embeds: [presentation.embed],
+    components: includeComponents ? buildSuggestionRows(suggestion, section, enabled) : [],
+  };
+}
+
+function defaultSubmitPanelEmbed(section, enabled) {
   const privacyNote = section.anonymous === true
     ? '\n\n🔒 **Anonymous suggestions are on.** Your name will not appear on suggestions you share.'
     : '';
@@ -125,16 +232,27 @@ function buildSubmitPanelPayload(guildId) {
     ? `Got an idea that could make the server better? Share it here.\n\nYou can open **My Suggestions** at any time to see what you have shared and check the team’s response.${privacyNote}`
     : 'Suggestions are paused right now. You can still open **My Suggestions** to view ideas you have already shared.';
 
+  return new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions')
+    .setDescription(description)
+    .setFooter({ text: enabled ? 'Every idea is welcome.' : 'Please check back later.' })
+    .setTimestamp();
+}
+
+function buildSubmitPanelPayload(guildOrId) {
+  const guild = guildOrId && typeof guildOrId === 'object' ? guildOrId : null;
+  const guildId = guild?.id || String(guildOrId || '');
+  const section = suggestions.getSection(guildId);
+  const enabled = isModuleEnabled(guildId, 'suggestions');
+  const fallbackEmbed = defaultSubmitPanelEmbed(section, enabled);
+  const rendered = renderSuggestionBinding(guild, 'suggestion_panel', templateVariables(guild, null, section));
   const submitButton = button('suggestions:submit', section.anonymous ? 'Share Anonymously' : 'Share a Suggestion')
     .setDisabled(!enabled);
 
   return {
-    embeds: [new EmbedBuilder()
-      .setColor(SUGGESTIONS_COLOR)
-      .setTitle('💡 Suggestions')
-      .setDescription(description)
-      .setFooter({ text: enabled ? 'Every idea is welcome.' : 'Please check back later.' })
-      .setTimestamp()],
+    content: rendered?.content || null,
+    embeds: [applyTemplateEmbed(rendered, fallbackEmbed, Date.now())],
     components: [row(
       submitButton,
       button('suggestions:mine:page:0', 'My Suggestions', ButtonStyle.Secondary),
@@ -270,7 +388,7 @@ function buildReviewerDecisionPayload(guild, suggestionId) {
       .setTitle('💡 Review Suggestion')
       .setDescription(item.content || '_No suggestion text was provided._')
       .addFields(
-        { name: 'Shared by', value: item.anonymous === true ? '🔒 Anonymous member' : item.authorId ? `<@${item.authorId}>` : 'Community member', inline: true },
+        { name: 'Shared by', value: publicSuggestionAuthor(item), inline: true },
         { name: 'Community feedback', value: voteSummary(item), inline: false },
         {
           name: 'What happens next?',
@@ -450,7 +568,7 @@ async function refreshDeployedPanel(guild) {
   const section = suggestions.getSection(guild.id);
   const existing = await fetchDeploymentMessage(guild, section.deployment);
   if (!existing?.editable) return null;
-  await existing.edit(buildSubmitPanelPayload(guild.id));
+  await existing.edit(buildSubmitPanelPayload(guild));
   return existing;
 }
 
@@ -459,7 +577,7 @@ async function deploySubmitPanel(guild) {
   if (!section.submitChannelId) throw new Error('Choose where members should share suggestions first.');
 
   const channel = await tracking.resolveSendableChannel(guild, section.submitChannelId, 'suggestions channel', { requireHistory: true });
-  const payload = buildSubmitPanelPayload(guild.id);
+  const payload = buildSubmitPanelPayload(guild);
   const existing = await fetchDeploymentMessage(guild, section.deployment);
 
   if (existing?.editable && existing.channelId === channel.id) {
@@ -490,8 +608,10 @@ async function deploySubmitPanel(guild) {
 
 module.exports = {
   SUGGESTIONS_COLOR,
+  templateVariables,
   buildSuggestionEmbed,
   buildSuggestionRows,
+  buildSuggestionMessagePayload,
   buildSubmitPanelPayload,
   buildMySuggestionsPayload,
   buildMySuggestionDetail,
