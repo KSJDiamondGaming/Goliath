@@ -19,7 +19,7 @@ async function withSuggestionLock(guildId, suggestionId, operation) {
 }
 
 function assertEnabled(guildId) {
-  if (!guildId || !isModuleEnabled(guildId, 'suggestions')) throw new Error('Suggestions are disabled for this server.');
+  if (!guildId || !isModuleEnabled(guildId, 'suggestions')) throw new Error('Suggestions are currently turned off for this server.');
   return suggestions.getSection(guildId);
 }
 
@@ -30,14 +30,14 @@ function isReviewer(member, section) {
 }
 
 async function resolveSendableChannel(guild, channelId, label, options = {}) {
-  if (!guild || !channelId) throw new Error(`${label} is not configured.`);
+  if (!guild || !channelId) throw new Error(`${label} is not set.`);
   const channel = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null);
-  if (!channel?.send) throw new Error(`${label} is unavailable or not sendable.`);
+  if (!channel?.send) throw new Error(`${label} is unavailable.`);
   const permissions = guild.members.me && channel.permissionsFor?.(guild.members.me);
   const required = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
   if (options.requireHistory === true) required.push(PermissionFlagsBits.ReadMessageHistory);
   if (permissions && !required.every((permission) => permissions.has(permission))) {
-    throw new Error(`Goliath lacks permission to use the ${label.toLowerCase()}.`);
+    throw new Error(`Goliath needs permission to view and post in the ${label.toLowerCase()}.`);
   }
   return channel;
 }
@@ -48,11 +48,11 @@ async function resolveSuggestionPayload(guild, payload = {}) {
 
 async function submitSuggestion(interaction, panel) {
   const guildId = interaction?.guildId;
-  if (!interaction?.guild || !interaction.user?.id) throw new Error('Server or member is unavailable.');
+  if (!interaction?.guild || !interaction.user?.id) throw new Error('The server or member could not be found.');
   assertEnabled(guildId);
 
   const content = String(interaction.fields.getTextInputValue('content') || '').trim();
-  if (content.length < 5 || content.length > 1800) throw new Error('Suggestion must be between 5 and 1800 characters.');
+  if (content.length < 5 || content.length > 1800) throw new Error('Your suggestion must be between 5 and 1800 characters.');
 
   let suggestionId = suggestions.createId('sg');
   while (suggestions.getSuggestion(guildId, suggestionId)) suggestionId = suggestions.createId('sg');
@@ -66,7 +66,7 @@ async function submitSuggestion(interaction, panel) {
       anonymous: fresh.anonymous === true,
     });
     const targetId = fresh.requireReview !== false ? fresh.reviewChannelId || fresh.submitChannelId : fresh.submitChannelId;
-    const channel = await resolveSendableChannel(interaction.guild, targetId, 'Suggestion channel', { requireHistory: true });
+    const channel = await resolveSendableChannel(interaction.guild, targetId, 'suggestions channel', { requireHistory: true });
     const payload = await resolveSuggestionPayload(interaction.guild, {
       embeds: [panel.buildSuggestionEmbed(interaction.guild, draft, fresh)],
       components: panel.buildSuggestionRows(draft, fresh),
@@ -112,18 +112,18 @@ async function bestEffortRefresh(guild, suggestionId, panel) {
 }
 
 async function vote(interaction, suggestionId, direction, panel) {
-  if (!['up', 'down'].includes(direction)) throw new Error('Invalid vote direction.');
+  if (!['up', 'down'].includes(direction)) throw new Error('That vote option is unavailable.');
   const guildId = interaction?.guildId;
   const userId = interaction?.user?.id;
   const id = suggestions.cleanSuggestionId(suggestionId);
-  if (!guildId || !userId || !id) throw new Error('Invalid suggestion vote.');
+  if (!guildId || !userId || !id) throw new Error('That suggestion vote is no longer available.');
 
   return withSuggestionLock(guildId, id, async () => {
     const section = assertEnabled(guildId);
-    if (section.voting === false) throw new Error('Voting is disabled.');
+    if (section.voting === false) throw new Error('Voting is currently turned off.');
     const current = suggestions.getSuggestion(guildId, id);
-    if (!current) throw new Error('Suggestion not found.');
-    if (current.status !== 'pending') throw new Error('Voting is closed for this suggestion.');
+    if (!current) throw new Error('That suggestion could not be found.');
+    if (current.status !== 'pending') throw new Error('Voting has closed for this suggestion.');
 
     const updated = suggestions.updateSuggestion(guildId, id, (item) => {
       const upVotes = new Set(item.upVotes || []);
@@ -140,7 +140,7 @@ async function vote(interaction, suggestionId, direction, panel) {
       return { ...item, upVotes: [...upVotes], downVotes: [...downVotes] };
     }, interaction.guild);
 
-    if (!updated) throw new Error('Suggestion could not be updated.');
+    if (!updated) throw new Error('Your vote could not be saved.');
     await bestEffortRefresh(interaction.guild, id, panel);
     return updated;
   });
@@ -150,13 +150,12 @@ async function notifyAuthor(guild, suggestion) {
   if (!guild || !suggestion?.authorId) return false;
   const member = await guild.members.fetch(suggestion.authorId).catch(() => null);
   if (!member?.user) return false;
-  const verdict = suggestion.status === 'approved' ? 'approved ✅' : 'denied ❌';
-  const note = suggestion.reviewReason ? `\nDecision note: ${suggestion.reviewReason}` : '';
-  const content = await emojis.resolveText(
-    guild.client,
-    guild.id,
-    `Your suggestion in **${guild.name}** was **${verdict}**.${note}\nSuggestion ID: \`${suggestion.suggestionId}\``,
-  );
+
+  const headline = suggestion.status === 'approved'
+    ? `💡 Good news — your suggestion in **${guild.name}** was approved.`
+    : `💡 Thanks for your suggestion in **${guild.name}**. The team decided not to approve it this time.`;
+  const note = suggestion.reviewReason ? `\n\n**Team response:** ${suggestion.reviewReason}` : '';
+  const content = await emojis.resolveText(guild.client, guild.id, `${headline}${note}`);
   return member.user.send(content).then(() => true).catch(() => false);
 }
 
@@ -176,18 +175,18 @@ async function publishReviewedSuggestion(guild, targetId, label, updated, sectio
 }
 
 async function review(interaction, suggestionId, action, panel, reason = '') {
-  if (!['approve', 'deny'].includes(action)) throw new Error('Invalid review action.');
+  if (!['approve', 'deny'].includes(action)) throw new Error('That review option is unavailable.');
   const guildId = interaction?.guildId;
   const reviewerId = interaction?.user?.id;
   const id = suggestions.cleanSuggestionId(suggestionId);
-  if (!guildId || !interaction?.guild || !reviewerId || !id) throw new Error('Invalid suggestion review.');
+  if (!guildId || !interaction?.guild || !reviewerId || !id) throw new Error('That suggestion review is no longer available.');
 
   return withSuggestionLock(guildId, id, async () => {
     const section = assertEnabled(guildId);
-    if (!isReviewer(interaction.member, section)) throw new Error('You do not have permission to review suggestions.');
+    if (!isReviewer(interaction.member, section)) throw new Error('You are not part of the suggestion review team.');
     const current = suggestions.getSuggestion(guildId, id);
-    if (!current) throw new Error('Suggestion not found.');
-    if (current.status !== 'pending') throw new Error(`Suggestion is already ${current.status}.`);
+    if (!current) throw new Error('That suggestion could not be found.');
+    if (current.status !== 'pending') throw new Error(`This suggestion has already been ${current.status === 'approved' ? 'approved' : 'declined'}.`);
 
     const status = action === 'approve' ? 'approved' : 'denied';
     const reviewReason = String(reason || '').trim().slice(0, 500);
@@ -197,7 +196,7 @@ async function review(interaction, suggestionId, action, panel, reason = '') {
       reviewedAt: new Date().toISOString(),
       reviewReason,
     }, interaction.guild);
-    if (!updated) throw new Error('Suggestion could not be updated.');
+    if (!updated) throw new Error('The decision could not be saved.');
 
     await bestEffortRefresh(interaction.guild, id, panel);
 
@@ -205,7 +204,7 @@ async function review(interaction, suggestionId, action, panel, reason = '') {
     await publishReviewedSuggestion(
       interaction.guild,
       targetId,
-      `${status} suggestions channel`,
+      `${status === 'approved' ? 'approved' : 'declined'} suggestions channel`,
       updated,
       section,
       panel,
