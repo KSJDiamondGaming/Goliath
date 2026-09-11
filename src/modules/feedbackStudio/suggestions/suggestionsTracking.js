@@ -67,10 +67,10 @@ async function submitSuggestion(interaction, panel) {
     });
     const targetId = fresh.requireReview !== false ? fresh.reviewChannelId || fresh.submitChannelId : fresh.submitChannelId;
     const channel = await resolveSendableChannel(interaction.guild, targetId, 'suggestions channel', { requireHistory: true });
-    const payload = await resolveSuggestionPayload(interaction.guild, {
-      embeds: [panel.buildSuggestionEmbed(interaction.guild, draft, fresh)],
-      components: panel.buildSuggestionRows(draft, fresh, true),
-    });
+    const payload = await resolveSuggestionPayload(
+      interaction.guild,
+      panel.buildSuggestionMessagePayload(interaction.guild, draft, fresh, true, true),
+    );
     const message = await channel.send(payload);
 
     try {
@@ -96,10 +96,10 @@ async function refreshSuggestionMessage(guild, suggestionId, panel) {
   const message = await channel?.messages?.fetch(suggestion.messageId).catch(() => null);
   if (!message?.editable) return null;
   const enabled = isModuleEnabled(guild.id, 'suggestions');
-  const payload = await resolveSuggestionPayload(guild, {
-    embeds: [panel.buildSuggestionEmbed(guild, suggestion, section)],
-    components: panel.buildSuggestionRows(suggestion, section, enabled),
-  });
+  const payload = await resolveSuggestionPayload(
+    guild,
+    panel.buildSuggestionMessagePayload(guild, suggestion, section, enabled, true),
+  );
   await message.edit(payload);
   return suggestion;
 }
@@ -193,9 +193,10 @@ async function publishReviewedSuggestion(guild, targetId, label, updated, sectio
   if (!targetId) return true;
   try {
     const target = await resolveSendableChannel(guild, targetId, label);
-    const payload = await resolveSuggestionPayload(guild, {
-      embeds: [panel.buildSuggestionEmbed(guild, updated, section)],
-    });
+    const payload = await resolveSuggestionPayload(
+      guild,
+      panel.buildSuggestionMessagePayload(guild, updated, section, true, false),
+    );
     await target.send(payload);
     return true;
   } catch (error) {
