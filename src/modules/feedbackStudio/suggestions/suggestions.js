@@ -13,11 +13,14 @@ const CONFIG_KEYS = Object.freeze([
   'reviewChannelId',
   'approvedChannelId',
   'deniedChannelId',
+  'logChannelId',
   'reviewerRoleIds',
   'anonymous',
   'voting',
   'requireReview',
 ]);
+const SUGGESTION_STATUSES = Object.freeze(['pending', 'discussing', 'approved', 'implemented', 'denied']);
+const MAX_HISTORY = 100;
 
 function now() { return new Date().toISOString(); }
 function isPlainObject(value) { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
@@ -40,6 +43,39 @@ function cleanTimestamp(value, fallback = null) {
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : fallback;
 }
+function referenceFromId(suggestionId) {
+  const compact = cleanSuggestionId(suggestionId).replace(/^sg_/, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase();
+  return `SUG-${compact || crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+function cleanReference(value, suggestionId) {
+  const ref = cleanString(value, '', 24).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  return ref || referenceFromId(suggestionId);
+}
+function defaultTitle(content = '') {
+  const firstLine = cleanString(content, '', 100).split(/\r?\n/)[0].trim();
+  return firstLine || 'Community Suggestion';
+}
+
+function normalizeHistoryEvent(input = {}) {
+  const source = isPlainObject(input) ? input : {};
+  const type = cleanString(source.type || source.action || 'updated', 'updated', 48).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+  const at = cleanTimestamp(source.at || source.createdAt, now());
+  return {
+    eventId: cleanSuggestionId(source.eventId) || createId('evt'),
+    type,
+    actorId: cleanDiscordId(source.actorId || source.userId),
+    at,
+    fromStatus: SUGGESTION_STATUSES.includes(source.fromStatus) ? source.fromStatus : null,
+    toStatus: SUGGESTION_STATUSES.includes(source.toStatus) ? source.toStatus : null,
+    note: cleanString(source.note || source.reason || '', '', 500),
+  };
+}
+
+function appendHistory(history = [], event = {}) {
+  const normalized = Array.isArray(history) ? history.map(normalizeHistoryEvent) : [];
+  normalized.push(normalizeHistoryEvent(event));
+  return normalized.slice(-MAX_HISTORY);
+}
 
 function defaultSuggestionsSection() {
   const timestamp = now();
@@ -48,6 +84,7 @@ function defaultSuggestionsSection() {
     reviewChannelId: null,
     approvedChannelId: null,
     deniedChannelId: null,
+    logChannelId: null,
     reviewerRoleIds: [],
     anonymous: false,
     voting: true,
@@ -59,7 +96,15 @@ function defaultSuggestionsSection() {
       updatedAt: null,
     },
     suggestions: {},
-    analytics: { submitted: 0, approved: 0, denied: 0, votesUp: 0, votesDown: 0 },
+    analytics: {
+      submitted: 0,
+      discussing: 0,
+      approved: 0,
+      implemented: 0,
+      denied: 0,
+      votesUp: 0,
+      votesDown: 0,
+    },
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -78,26 +123,44 @@ function normalizeDeployment(input = {}) {
 function normalizeSuggestion(input = {}, defaults = {}) {
   const suggestionId = cleanSuggestionId(input.suggestionId || input.id) || createId('sg');
   const createdAt = cleanTimestamp(input.createdAt, now());
+  const status = SUGGESTION_STATUSES.includes(input.status) ? input.status : 'pending';
   const upVotes = cleanIdArray(input.upVotes);
   const upVoteSet = new Set(upVotes);
   const downVotes = cleanIdArray(input.downVotes).filter((userId) => !upVoteSet.has(userId));
+  const content = cleanString(input.content || '', '', 1800);
+  const rawHistory = Array.isArray(input.history) ? input.history.map(normalizeHistoryEvent).slice(-MAX_HISTORY) : [];
+  const history = rawHistory.length
+    ? rawHistory
+    : [normalizeHistoryEvent({ type: 'submitted', actorId: input.authorId, at: createdAt, toStatus: 'pending' })];
+
   return {
     suggestionId,
     id: suggestionId,
-    status: ['pending', 'approved', 'denied'].includes(input.status) ? input.status : 'pending',
-    content: cleanString(input.content || '', '', 1800),
+    reference: cleanReference(input.reference, suggestionId),
+    title: cleanString(input.title || defaultTitle(content), 'Community Suggestion', 100),
+    status,
+    content,
     authorId: cleanDiscordId(input.authorId),
     anonymous: typeof input.anonymous === 'boolean' ? input.anonymous : defaults.anonymous === true,
     channelId: cleanDiscordId(input.channelId),
     messageId: cleanDiscordId(input.messageId),
+    reviewChannelId: cleanDiscordId(input.reviewChannelId),
     reviewMessageId: cleanDiscordId(input.reviewMessageId),
+    discussionThreadId: cleanDiscordId(input.discussionThreadId),
+    votePaused: input.votePaused === true || status !== 'pending',
     upVotes,
     downVotes,
     createdAt,
     updatedAt: cleanTimestamp(input.updatedAt, createdAt),
+    discussionStartedBy: cleanDiscordId(input.discussionStartedBy),
+    discussionStartedAt: cleanTimestamp(input.discussionStartedAt, null),
     reviewedBy: cleanDiscordId(input.reviewedBy),
     reviewedAt: cleanTimestamp(input.reviewedAt, null),
     reviewReason: cleanString(input.reviewReason || '', '', 500),
+    implementedBy: cleanDiscordId(input.implementedBy),
+    implementedAt: cleanTimestamp(input.implementedAt, null),
+    implementationNote: cleanString(input.implementationNote || '', '', 500),
+    history,
   };
 }
 
@@ -105,7 +168,9 @@ function calculateAnalytics(records = {}) {
   const items = Object.values(records || {});
   return {
     submitted: items.length,
-    approved: items.filter((item) => item.status === 'approved').length,
+    discussing: items.filter((item) => item.status === 'discussing').length,
+    approved: items.filter((item) => ['approved', 'implemented'].includes(item.status)).length,
+    implemented: items.filter((item) => item.status === 'implemented').length,
     denied: items.filter((item) => item.status === 'denied').length,
     votesUp: items.reduce((total, item) => total + (Array.isArray(item.upVotes) ? item.upVotes.length : 0), 0),
     votesDown: items.reduce((total, item) => total + (Array.isArray(item.downVotes) ? item.downVotes.length : 0), 0),
@@ -137,6 +202,7 @@ function normalizeSection(section = {}) {
     reviewChannelId: cleanDiscordId(source.reviewChannelId),
     approvedChannelId: cleanDiscordId(source.approvedChannelId),
     deniedChannelId: cleanDiscordId(source.deniedChannelId),
+    logChannelId: cleanDiscordId(source.logChannelId),
     reviewerRoleIds: cleanIdArray(source.reviewerRoleIds),
     anonymous: source.anonymous === true,
     voting: source.voting !== false,
@@ -233,6 +299,13 @@ function updateSuggestion(guildId, suggestionId, updater, guildOrMeta = {}) {
   }, guildOrMeta).suggestions?.[id] || null;
 }
 
+function addHistoryEvent(guildId, suggestionId, event, guildOrMeta = {}) {
+  return updateSuggestion(guildId, suggestionId, (current) => ({
+    ...current,
+    history: appendHistory(current.history, event),
+  }), guildOrMeta);
+}
+
 function saveDeployment(guildId, deployment, guildOrMeta = {}) {
   return mutateSection(guildId, (section) => ({
     ...section,
@@ -247,10 +320,13 @@ function incrementAnalytics(guildId, _changes = {}, guildOrMeta = {}) {
 
 module.exports = {
   MODULE_KEY,
+  SUGGESTION_STATUSES,
   now,
   cleanDiscordId,
   cleanSuggestionId,
   createId,
+  referenceFromId,
+  appendHistory,
   defaultSuggestionsSection,
   normalizeSection,
   normalizeSuggestion,
@@ -260,6 +336,7 @@ module.exports = {
   saveSuggestion,
   getSuggestion,
   updateSuggestion,
+  addHistoryEvent,
   saveDeployment,
   incrementAnalytics,
 };

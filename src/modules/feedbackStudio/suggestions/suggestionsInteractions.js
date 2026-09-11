@@ -39,7 +39,7 @@ async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestion
     console.warn('[Suggestions] Could not refresh the published suggestions panel:', error.message || error);
   });
   if (suggestionMessages) await tracking.refreshPendingSuggestions(guild, panel).catch((error) => {
-    console.warn('[Suggestions] Could not refresh pending suggestion messages:', error.message || error);
+    console.warn('[Suggestions] Could not refresh active suggestion messages:', error.message || error);
   });
 }
 
@@ -86,9 +86,9 @@ async function handleSuggestionsAdminInteraction(interaction) {
     if (interaction.isChannelSelectMenu?.()) {
       const value = interaction.values?.[0] || null;
       const property = id.split(':')[2];
-      if (['submitChannel', 'reviewChannel', 'approvedChannel', 'deniedChannel'].includes(property)) {
+      if (['submitChannel', 'reviewChannel', 'approvedChannel', 'deniedChannel', 'logChannel'].includes(property)) {
         save((section) => ({ ...section, [`${property}Id`]: value }));
-        const page = ['approvedChannel', 'deniedChannel'].includes(property) ? 'destinations' : 'overview';
+        const page = ['approvedChannel', 'deniedChannel', 'logChannel'].includes(property) ? 'destinations' : 'overview';
         return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, page));
       }
     } else if (id === 'admin:suggestions:enable') {
@@ -160,8 +160,8 @@ async function handleSuggestionsInteraction(interaction) {
       const saved = await tracking.submitSuggestion(interaction, panel);
       await interaction.editReply({
         content: saved.anonymous === true
-          ? '✅ Thanks — your suggestion has been shared anonymously.'
-          : '✅ Thanks — your suggestion has been shared.',
+          ? `✅ **${saved.title}** has been shared anonymously and sent to the management workflow.`
+          : `✅ **${saved.title}** has been shared and sent to the management workflow.`,
       });
       return true;
     }
@@ -173,14 +173,39 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
+    if (interaction.isButton?.() && parts[1] === 'manage') {
+      const suggestionId = suggestions.cleanSuggestionId(parts[2]);
+      const action = parts[3];
+      if (!suggestionId || !['discuss', 'resume', 'approve', 'deny', 'implemented'].includes(action)) {
+        throw new Error('That management action is no longer available.');
+      }
+      const section = tracking.assertEnabled(interaction.guildId);
+      if (!tracking.isReviewer(interaction.member, section)) throw new Error('Only the suggestions management team can use these controls.');
+
+      if (['approve', 'deny', 'implemented'].includes(action)) {
+        await interaction.showModal(panel.buildReviewModal(suggestionId, action));
+        return true;
+      }
+
+      await interaction.deferUpdate();
+      const updated = await tracking.manage(interaction, suggestionId, action, panel);
+      await interaction.followUp({
+        content: action === 'discuss'
+          ? `💬 ${updated.reference} is now under team discussion. Community voting has been paused.`
+          : `▶️ ${updated.reference} is open for community voting again.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+
+    // Legacy public management button support for messages created before the managed workflow update.
     if (interaction.isButton?.() && parts[1] === 'reviewOpen') {
       const suggestionId = suggestions.cleanSuggestionId(parts[2]);
       if (!suggestionId) throw new Error('That review option is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
-      if (!tracking.isReviewer(interaction.member, section)) throw new Error('Only the suggestion review team can use this button.');
+      if (!tracking.isReviewer(interaction.member, section)) throw new Error('Only the suggestions management team can use this button.');
       const current = suggestions.getSuggestion(interaction.guildId, suggestionId);
       if (!current) throw new Error('That suggestion could not be found.');
-      if (current.status !== 'pending') throw new Error(`This suggestion has already been ${current.status === 'approved' ? 'approved' : 'declined'}.`);
       await interaction.reply(panel.buildReviewerDecisionPayload(interaction.guild, suggestionId));
       return true;
     }
@@ -191,27 +216,28 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
+    // Legacy approve/deny controls remain valid for old management messages.
     if (interaction.isButton?.() && parts[1] === 'review') {
       if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
-      if (!tracking.isReviewer(interaction.member, section)) throw new Error('You are not part of the suggestion review team.');
-      const current = suggestions.getSuggestion(interaction.guildId, parts[2]);
-      if (!current) throw new Error('That suggestion could not be found.');
-      if (current.status !== 'pending') throw new Error(`This suggestion has already been ${current.status === 'approved' ? 'approved' : 'declined'}.`);
+      if (!tracking.isReviewer(interaction.member, section)) throw new Error('You are not part of the suggestions management team.');
       await interaction.showModal(panel.buildReviewModal(parts[2], parts[3]));
       return true;
     }
 
     if (interaction.isModalSubmit?.() && parts[1] === 'reviewModal') {
-      if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
+      const suggestionId = suggestions.cleanSuggestionId(parts[2]);
+      const action = parts[3];
+      if (!suggestionId || !['approve', 'deny', 'implemented'].includes(action)) throw new Error('That management action is no longer available.');
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const reason = String(interaction.fields.getTextInputValue('reason') || '').trim();
-      await tracking.review(interaction, parts[2], parts[3], panel, reason);
-      await interaction.editReply({
-        content: parts[3] === 'approve'
-          ? '✅ Approved. The suggestion is now closed and the decision has been saved.'
-          : '✅ Declined. The suggestion is now closed and the decision has been saved.',
-      });
+      const updated = await tracking.manage(interaction, suggestionId, action, panel, reason);
+      const messages = {
+        approve: `✅ ${updated.reference} has been approved. Voting is closed and the action was logged.`,
+        deny: `❌ ${updated.reference} has been declined. The reason is visible on the original suggestion and the action was logged.`,
+        implemented: `🚀 ${updated.reference} has been marked as implemented. The original suggestion and audit log have been updated.`,
+      };
+      await interaction.editReply({ content: messages[action] });
       return true;
     }
 
