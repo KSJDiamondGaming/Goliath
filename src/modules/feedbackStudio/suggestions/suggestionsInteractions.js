@@ -4,10 +4,11 @@ const { MessageFlags } = require('discord.js');
 const suggestions = require('./suggestions');
 const panel = require('./suggestionsPanel');
 const tracking = require('./suggestionsTracking');
+const panelNavigation = require('../../../core/ui/panelNavigation');
 const { setModuleEnabled } = require('../../../core/guild/guildManager');
 
 async function safeReply(interaction, content) {
-  const text = String(content || 'Suggestion action failed.').slice(0, 1900);
+  const text = String(content || 'That suggestion action could not be completed.').slice(0, 1900);
   const payload = { content: text, flags: MessageFlags.Ephemeral };
   try {
     if (interaction.replied) return await interaction.followUp(payload);
@@ -37,7 +38,7 @@ async function handleSuggestionsAdminInteraction(interaction) {
   const id = String(interaction?.customId || '');
   if (!id.startsWith('admin:suggestions')) return false;
   if (!interaction.guild?.id) {
-    await safeReply(interaction, '❌ Suggestions setup is only available inside a server.');
+    await safeReply(interaction, '❌ Suggestions can only be managed inside a server.');
     return true;
   }
 
@@ -45,8 +46,29 @@ async function handleSuggestionsAdminInteraction(interaction) {
   const save = (updater) => suggestions.updateSection(interaction.guild.id, updater, interaction.guild);
 
   try {
+    const rolePicker = panelNavigation.parseRolePickerId(id);
+    if (rolePicker?.baseId === 'admin:suggestions:reviewerRoles') {
+      if (rolePicker.kind === 'select' && interaction.isStringSelectMenu?.()) {
+        const section = suggestions.getSection(interaction.guild.id);
+        const reviewerRoleIds = panelNavigation.mergeRolePickerSelection(
+          interaction.guild,
+          section.reviewerRoleIds,
+          interaction.values || [],
+          rolePicker.page,
+        );
+        save((current) => ({ ...current, reviewerRoleIds }));
+        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+      }
+      if (rolePicker.kind === 'page' && interaction.isButton?.()) {
+        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+      }
+    }
+
     if (id === 'admin:suggestions' || id === 'admin:suggestions:overview') {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
+    }
+    if (id === 'admin:suggestions:reviewers') {
+      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'reviewers'));
     }
     if (id === 'admin:suggestions:destinations') {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'destinations'));
@@ -60,8 +82,6 @@ async function handleSuggestionsAdminInteraction(interaction) {
         const page = ['approvedChannel', 'deniedChannel'].includes(property) ? 'destinations' : 'overview';
         return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, page));
       }
-    } else if (interaction.isRoleSelectMenu?.() && id === 'admin:suggestions:reviewerRoles') {
-      save((section) => ({ ...section, reviewerRoleIds: [...new Set(interaction.values || [])] }));
     } else if (id === 'admin:suggestions:enable') {
       setModuleEnabled(interaction.guild.id, 'suggestions', true, interaction.guild);
     } else if (id === 'admin:suggestions:disable') {
@@ -80,7 +100,7 @@ async function handleSuggestionsAdminInteraction(interaction) {
     return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
   } catch (error) {
     console.error('[Suggestions] Admin interaction failed:', error);
-    await safeReply(interaction, `❌ Suggestions setup failed: ${error.message || 'Unknown error'}`);
+    await safeReply(interaction, `❌ Suggestions could not be updated: ${error.message || 'Please try again.'}`);
     return true;
   }
 }
@@ -118,42 +138,42 @@ async function handleSuggestionsInteraction(interaction) {
 
     if (interaction.isModalSubmit?.() && interaction.customId === 'suggestions:modal:submit') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const saved = await tracking.submitSuggestion(interaction, panel);
-      await interaction.editReply({ content: `✅ Suggestion submitted. ID: \`${saved.suggestionId}\`` });
+      await tracking.submitSuggestion(interaction, panel);
+      await interaction.editReply({ content: '✅ Thanks — your suggestion has been sent.' });
       return true;
     }
 
     if (interaction.isButton?.() && parts[1] === 'vote') {
-      if (!suggestions.cleanSuggestionId(parts[2]) || !['up', 'down'].includes(parts[3])) throw new Error('Invalid vote interaction.');
+      if (!suggestions.cleanSuggestionId(parts[2]) || !['up', 'down'].includes(parts[3])) throw new Error('That vote is no longer available.');
       await interaction.deferUpdate();
       await tracking.vote(interaction, parts[2], parts[3], panel);
       return true;
     }
 
     if (interaction.isButton?.() && parts[1] === 'review') {
-      if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('Invalid review interaction.');
+      if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
-      if (!tracking.isReviewer(interaction.member, section)) throw new Error('You do not have permission to review suggestions.');
+      if (!tracking.isReviewer(interaction.member, section)) throw new Error('You are not part of the suggestion review team.');
       const current = suggestions.getSuggestion(interaction.guildId, parts[2]);
-      if (!current) throw new Error('Suggestion not found.');
-      if (current.status !== 'pending') throw new Error(`Suggestion is already ${current.status}.`);
+      if (!current) throw new Error('That suggestion could not be found.');
+      if (current.status !== 'pending') throw new Error(`This suggestion has already been ${current.status === 'approved' ? 'approved' : 'declined'}.`);
       await interaction.showModal(panel.buildReviewModal(parts[2], parts[3]));
       return true;
     }
 
     if (interaction.isModalSubmit?.() && parts[1] === 'reviewModal') {
-      if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('Invalid review interaction.');
+      if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const reason = String(interaction.fields.getTextInputValue('reason') || '').trim();
       await tracking.review(interaction, parts[2], parts[3], panel, reason);
-      await interaction.editReply({ content: `✅ Suggestion ${parts[3] === 'approve' ? 'approved' : 'denied'}.` });
+      await interaction.editReply({ content: `✅ Suggestion ${parts[3] === 'approve' ? 'approved' : 'declined'}.` });
       return true;
     }
 
     return false;
   } catch (error) {
     console.error('[Suggestions] Interaction failed:', error);
-    await safeReply(interaction, `❌ Suggestion action failed: ${error.message || 'Unknown error'}`);
+    await safeReply(interaction, `❌ ${error.message || 'That suggestion action could not be completed.'}`);
     return true;
   }
 }
