@@ -12,6 +12,7 @@ const {
   ChannelType,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
+  MessageFlags,
 } = require('discord.js');
 const suggestions = require('./suggestions');
 const tracking = require('./suggestionsTracking');
@@ -22,12 +23,13 @@ const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuild
 const formatChannel = (id) => id ? `<#${id}>` : '`Not set`';
 const formatRoles = (ids = []) => Array.isArray(ids) && ids.filter(Boolean).length ? ids.filter(Boolean).map((id) => `<@&${id}>`).join(', ') : '`None`';
 const statusEmoji = (status) => status === 'approved' ? '✅' : status === 'denied' ? '❌' : '💡';
+const statusLabel = (status) => status === 'approved' ? 'Approved' : status === 'denied' ? 'Denied' : 'Pending';
 
 function buildSuggestionEmbed(guild, suggestion, section) {
-  const author = section.anonymous ? 'Anonymous' : `<@${suggestion.authorId}>`;
+  const author = suggestion.anonymous === true ? 'Anonymous' : suggestion.authorId ? `<@${suggestion.authorId}>` : 'Unknown';
   const fields = [
     { name: 'Author', value: author, inline: true },
-    { name: 'Status', value: suggestion.status, inline: true },
+    { name: 'Status', value: statusLabel(suggestion.status), inline: true },
     { name: 'Votes', value: `👍 ${suggestion.upVotes.length}  👎 ${suggestion.downVotes.length}`, inline: true },
   ];
   if (suggestion.status !== 'pending' && suggestion.reviewReason) {
@@ -44,14 +46,18 @@ function buildSuggestionEmbed(guild, suggestion, section) {
 
 function buildSuggestionRows(suggestion, section) {
   const rows = [];
-  if (section.voting !== false && suggestion.status === 'pending') rows.push(row(
-    button(`suggestions:vote:${suggestion.suggestionId}:up`, `👍 ${suggestion.upVotes.length}`, ButtonStyle.Secondary),
-    button(`suggestions:vote:${suggestion.suggestionId}:down`, `👎 ${suggestion.downVotes.length}`, ButtonStyle.Secondary)
-  ));
-  if (section.requireReview !== false && suggestion.status === 'pending') rows.push(row(
-    button(`suggestions:review:${suggestion.suggestionId}:approve`, 'Approve', ButtonStyle.Success),
-    button(`suggestions:review:${suggestion.suggestionId}:deny`, 'Deny', ButtonStyle.Danger)
-  ));
+  if (section.voting !== false && suggestion.status === 'pending') {
+    rows.push(row(
+      button(`suggestions:vote:${suggestion.suggestionId}:up`, `👍 ${suggestion.upVotes.length}`, ButtonStyle.Secondary),
+      button(`suggestions:vote:${suggestion.suggestionId}:down`, `👎 ${suggestion.downVotes.length}`, ButtonStyle.Secondary),
+    ));
+  }
+  if (section.requireReview !== false && suggestion.status === 'pending') {
+    rows.push(row(
+      button(`suggestions:review:${suggestion.suggestionId}:approve`, 'Approve', ButtonStyle.Success),
+      button(`suggestions:review:${suggestion.suggestionId}:deny`, 'Deny', ButtonStyle.Danger),
+    ));
+  }
   return rows;
 }
 
@@ -66,7 +72,7 @@ function buildSubmitPanelPayload(guildId) {
       .setTimestamp()],
     components: [row(
       button('suggestions:submit', section.anonymous ? 'Submit Anonymous Suggestion' : 'Submit Suggestion'),
-      button('suggestions:mine:page:0', 'My Suggestions', ButtonStyle.Secondary)
+      button('suggestions:mine:page:0', 'My Suggestions', ButtonStyle.Secondary),
     )],
   };
 }
@@ -88,9 +94,10 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
     return out;
   }, { pending: 0, approved: 0, denied: 0 });
   const lines = pageRecords.length
-    ? pageRecords.map((item) => `${statusEmoji(item.status)} **${item.status.toUpperCase()}** · \`${item.suggestionId}\`\n${String(item.content || '').replace(/\s+/g, ' ').slice(0, 120)}${String(item.content || '').length > 120 ? '…' : ''}`)
+    ? pageRecords.map((item) => `${statusEmoji(item.status)} **${statusLabel(item.status).toUpperCase()}** · \`${item.suggestionId}\`\n${String(item.content || '').replace(/\s+/g, ' ').slice(0, 120)}${String(item.content || '').length > 120 ? '…' : ''}`)
     : ['You have not submitted any suggestions yet.'];
   const components = [];
+
   if (pageRecords.length) {
     components.push(row(new StringSelectMenuBuilder()
       .setCustomId('suggestions:mine:select')
@@ -98,16 +105,18 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(pageRecords.map((item) => ({
-        label: `${statusEmoji(item.status)} ${item.status.toUpperCase()} · ${item.suggestionId}`.slice(0, 100),
+        label: `${statusEmoji(item.status)} ${statusLabel(item.status).toUpperCase()} · ${item.suggestionId}`.slice(0, 100),
         description: String(item.content || '').replace(/\s+/g, ' ').slice(0, 100) || 'No content',
         value: `${item.suggestionId}|${safePage}`,
       })))));
   }
+
   components.push(row(
     button(`suggestions:mine:page:${Math.max(0, safePage - 1)}`, 'Previous', ButtonStyle.Secondary).setDisabled(safePage === 0),
     button(`suggestions:mine:page:${Math.min(totalPages - 1, safePage + 1)}`, 'Next', ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
-    button('suggestions:mine:close', 'Close', ButtonStyle.Secondary)
+    button('suggestions:mine:close', 'Close', ButtonStyle.Secondary),
   ));
+
   return {
     embeds: [new EmbedBuilder()
       .setColor(0x5865f2)
@@ -122,7 +131,7 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
       .setFooter({ text: 'Only you can see this view' })
       .setTimestamp()],
     components,
-    flags: 64,
+    flags: MessageFlags.Ephemeral,
   };
 }
 
@@ -133,21 +142,21 @@ function buildMySuggestionDetail(guildId, userId, suggestionId, page = 0) {
   return {
     embeds: [new EmbedBuilder()
       .setColor(item.status === 'approved' ? 0x57f287 : item.status === 'denied' ? 0xed4245 : 0x5865f2)
-      .setTitle(`${statusEmoji(item.status)} My Suggestion · ${item.status.toUpperCase()}`)
+      .setTitle(`${statusEmoji(item.status)} My Suggestion · ${statusLabel(item.status).toUpperCase()}`)
       .setDescription(item.content || '_No content_')
       .addFields(
         { name: 'Suggestion ID', value: `\`${item.suggestionId}\``, inline: true },
         { name: 'Votes', value: `👍 ${item.upVotes.length} · 👎 ${item.downVotes.length}`, inline: true },
         { name: 'Reviewed', value: reviewed, inline: false },
-        ...(item.reviewReason ? [{ name: 'Decision Note', value: item.reviewReason, inline: false }] : [])
+        ...(item.reviewReason ? [{ name: 'Decision Note', value: item.reviewReason, inline: false }] : []),
       )
       .setFooter({ text: 'Only you can see this view' })
       .setTimestamp(new Date(item.updatedAt || item.createdAt || Date.now()))],
     components: [row(
       button(`suggestions:mine:page:${Math.max(0, Number(page) || 0)}`, '⬅️ My Suggestions', ButtonStyle.Secondary),
-      button('suggestions:mine:close', 'Close', ButtonStyle.Secondary)
+      button('suggestions:mine:close', 'Close', ButtonStyle.Secondary),
     )],
-    flags: 64,
+    flags: MessageFlags.Ephemeral,
   };
 }
 
@@ -162,7 +171,7 @@ function buildSubmitModal() {
         .setStyle(TextInputStyle.Paragraph)
         .setMinLength(5)
         .setMaxLength(1800)
-        .setRequired(true)
+        .setRequired(true),
     ));
 }
 
@@ -178,7 +187,7 @@ function buildReviewModal(suggestionId, action) {
         .setPlaceholder(approve ? 'Why is this being approved?' : 'Why is this being denied?')
         .setStyle(TextInputStyle.Paragraph)
         .setMaxLength(500)
-        .setRequired(false)
+        .setRequired(false),
     ));
 }
 
@@ -201,6 +210,7 @@ function overviewDescription(section, enabled) {
 function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', page = 'overview') {
   const section = suggestions.getSection(guild.id);
   const enabled = isModuleEnabled(guild.id, 'suggestions');
+
   if (page === 'destinations') {
     const embed = new EmbedBuilder()
       .setColor(enabled ? 0x57f287 : 0x5865f2)
@@ -227,6 +237,7 @@ function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', p
     .setDescription(overviewDescription(section, enabled))
     .setFooter({ text: `Requested by ${memberDisplayName}` })
     .setTimestamp();
+
   return { embeds: [embed], components: [
     row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:submitChannel').setPlaceholder('Submit channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
     row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:reviewChannel').setPlaceholder('Review channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
@@ -236,17 +247,51 @@ function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', p
       button(enabled ? 'admin:suggestions:disable' : 'admin:suggestions:enable', enabled ? '⏸️ Disable' : '▶️ Enable', ButtonStyle.Secondary),
       button('admin:suggestions:toggleVoting', '🗳️ Voting', ButtonStyle.Secondary),
       button('admin:suggestions:toggleReview', '🔎 Review', ButtonStyle.Secondary),
-      button('admin:suggestions:toggleAnonymous', '👤 Anonymous', ButtonStyle.Secondary)
+      button('admin:suggestions:toggleAnonymous', '👤 Anonymous', ButtonStyle.Secondary),
     ),
     row(button('admin:suggestions:destinations', '📬 Destinations', ButtonStyle.Primary), button('admin:modules', '⬅️ Modules', ButtonStyle.Secondary)),
   ] };
 }
 
+async function fetchDeploymentMessage(guild, deployment) {
+  if (!deployment?.channelId || !deployment?.messageId) return null;
+  const channel = guild.channels.cache.get(deployment.channelId) || await guild.channels.fetch(deployment.channelId).catch(() => null);
+  if (!channel?.messages?.fetch) return null;
+  return channel.messages.fetch(deployment.messageId).catch(() => null);
+}
+
 async function deploySubmitPanel(guild) {
   const section = tracking.assertEnabled(guild?.id);
   if (!section.submitChannelId) throw new Error('Choose a submit channel first.');
-  const channel = await tracking.resolveSendableChannel(guild, section.submitChannelId, 'Submit channel');
-  return channel.send(buildSubmitPanelPayload(guild.id));
+
+  const channel = await tracking.resolveSendableChannel(guild, section.submitChannelId, 'Submit channel', { requireHistory: true });
+  const payload = buildSubmitPanelPayload(guild.id);
+  const existing = await fetchDeploymentMessage(guild, section.deployment);
+
+  if (existing?.editable && existing.channelId === channel.id) {
+    await existing.edit(payload);
+    suggestions.saveDeployment(guild.id, {
+      channelId: existing.channelId,
+      messageId: existing.id,
+      deployedAt: section.deployment.deployedAt || suggestions.now(),
+    }, guild);
+    return existing;
+  }
+
+  const message = await channel.send(payload);
+  try {
+    suggestions.saveDeployment(guild.id, {
+      channelId: message.channelId,
+      messageId: message.id,
+      deployedAt: suggestions.now(),
+    }, guild);
+  } catch (error) {
+    await message.delete().catch(() => null);
+    throw error;
+  }
+
+  if (existing?.deletable && existing.id !== message.id) await existing.delete().catch(() => null);
+  return message;
 }
 
 module.exports = {
