@@ -24,7 +24,7 @@ const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuild
 const formatChannel = (id) => id ? `<#${id}>` : '*Not set*';
 const formatRoles = (ids = []) => Array.isArray(ids) && ids.filter(Boolean).length ? ids.filter(Boolean).map((id) => `<@&${id}>`).join(', ') : '*None selected*';
 const statusEmoji = (status) => status === 'approved' ? '✅' : status === 'denied' ? '❌' : '💡';
-const statusLabel = (status) => status === 'approved' ? 'Approved' : status === 'denied' ? 'Declined' : 'Pending';
+const statusLabel = (status, section = {}) => status === 'approved' ? 'Approved' : status === 'denied' ? 'Declined' : section.requireReview !== false ? 'Awaiting review' : 'Open';
 
 function compactPreview(content, maxLength = 80) {
   const text = String(content || '').replace(/\s+/g, ' ').trim();
@@ -36,26 +36,56 @@ function shortDate(value) {
   return Number.isFinite(date.getTime()) ? date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Unknown date';
 }
 
+function discordTimestamp(value, style = 'F') {
+  const date = new Date(value || Date.now());
+  if (!Number.isFinite(date.getTime())) return 'Unknown';
+  return `<t:${Math.floor(date.getTime() / 1000)}:${style}>`;
+}
+
+function voteSummary(suggestion) {
+  return `👍 **${suggestion.upVotes.length}** support   ·   👎 **${suggestion.downVotes.length}** not for me`;
+}
+
 function buildSuggestionEmbed(guild, suggestion, section) {
-  const fields = [];
-  if (suggestion.anonymous === true) fields.push({ name: 'Shared by', value: 'Anonymous member', inline: true });
-  else if (suggestion.authorId) fields.push({ name: 'Shared by', value: `<@${suggestion.authorId}>`, inline: true });
-  fields.push(
-    { name: 'Status', value: `${statusEmoji(suggestion.status)} ${statusLabel(suggestion.status)}`, inline: true },
-    { name: 'Community vote', value: `👍 ${suggestion.upVotes.length}   👎 ${suggestion.downVotes.length}`, inline: true },
-  );
-  if (suggestion.status !== 'pending' && suggestion.reviewReason) {
-    fields.push({ name: 'Team response', value: suggestion.reviewReason, inline: false });
+  const enabled = guild?.id ? isModuleEnabled(guild.id, 'suggestions') : true;
+  const fields = [
+    {
+      name: 'Shared by',
+      value: suggestion.anonymous === true ? '🔒 Anonymous member' : suggestion.authorId ? `<@${suggestion.authorId}>` : 'Community member',
+      inline: true,
+    },
+    {
+      name: 'Status',
+      value: `${statusEmoji(suggestion.status)} ${statusLabel(suggestion.status, section)}`,
+      inline: true,
+    },
+  ];
+
+  if (section.voting !== false || suggestion.upVotes.length || suggestion.downVotes.length) {
+    fields.push({ name: 'Community feedback', value: voteSummary(suggestion), inline: false });
+  }
+
+  if (suggestion.status !== 'pending') {
+    fields.push({ name: 'Decision made', value: discordTimestamp(suggestion.reviewedAt || suggestion.updatedAt, 'R'), inline: true });
+    fields.push({
+      name: 'Team response',
+      value: suggestion.reviewReason || (suggestion.status === 'approved'
+        ? 'The team has approved this suggestion.'
+        : 'The team has decided not to move forward with this suggestion.'),
+      inline: false,
+    });
   }
 
   const title = suggestion.status === 'approved'
-    ? '💡 Suggestion Approved'
+    ? '💡 Approved Suggestion'
     : suggestion.status === 'denied'
-      ? '💡 Suggestion Declined'
-      : '💡 New Suggestion';
-  const footer = suggestion.status === 'pending'
-    ? (section.voting !== false ? 'Use the buttons below to have your say.' : 'Thanks for sharing an idea with the community.')
-    : 'Thanks for helping improve the community.';
+      ? '💡 Declined Suggestion'
+      : '💡 Community Suggestion';
+
+  let footer = 'Thanks for helping improve the community.';
+  if (suggestion.status === 'pending' && !enabled) footer = 'Suggestions are currently paused.';
+  else if (suggestion.status === 'pending' && section.voting !== false) footer = 'Use the buttons below to share your view.';
+  else if (suggestion.status === 'pending' && section.requireReview !== false) footer = 'This suggestion is waiting for the team to review it.';
 
   return new EmbedBuilder()
     .setColor(SUGGESTIONS_COLOR)
@@ -66,37 +96,47 @@ function buildSuggestionEmbed(guild, suggestion, section) {
     .setTimestamp(new Date(suggestion.createdAt || Date.now()));
 }
 
-function buildSuggestionRows(suggestion, section) {
+function buildSuggestionRows(suggestion, section, enabled = true) {
   const rows = [];
-  if (section.voting !== false && suggestion.status === 'pending') {
+  if (!enabled || suggestion.status !== 'pending') return rows;
+
+  if (section.voting !== false) {
     rows.push(row(
-      button(`suggestions:vote:${suggestion.suggestionId}:up`, `👍 ${suggestion.upVotes.length}`, ButtonStyle.Secondary),
-      button(`suggestions:vote:${suggestion.suggestionId}:down`, `👎 ${suggestion.downVotes.length}`, ButtonStyle.Secondary),
+      button(`suggestions:vote:${suggestion.suggestionId}:up`, `👍 Support · ${suggestion.upVotes.length}`, ButtonStyle.Secondary),
+      button(`suggestions:vote:${suggestion.suggestionId}:down`, `👎 Not for me · ${suggestion.downVotes.length}`, ButtonStyle.Secondary),
     ));
   }
-  if (section.requireReview !== false && suggestion.status === 'pending') {
+
+  if (section.requireReview !== false) {
     rows.push(row(
-      button(`suggestions:review:${suggestion.suggestionId}:approve`, 'Approve', ButtonStyle.Success),
-      button(`suggestions:review:${suggestion.suggestionId}:deny`, 'Decline', ButtonStyle.Danger),
+      button(`suggestions:reviewOpen:${suggestion.suggestionId}`, '🛡️ Team Review', ButtonStyle.Primary),
     ));
   }
   return rows;
 }
 
 function buildSubmitPanelPayload(guildId) {
-  const section = tracking.assertEnabled(guildId);
+  const section = suggestions.getSection(guildId);
+  const enabled = isModuleEnabled(guildId, 'suggestions');
   const privacyNote = section.anonymous === true
-    ? '\n\n🔒 **Anonymous mode is on.** Your name will be hidden when your suggestion is posted.'
+    ? '\n\n🔒 **Anonymous suggestions are on.** Your name will not appear on suggestions you share.'
     : '';
+  const description = enabled
+    ? `Got an idea that could make the server better? Share it here.\n\nYou can open **My Suggestions** at any time to see what you have shared and check the team’s response.${privacyNote}`
+    : 'Suggestions are paused right now. You can still open **My Suggestions** to view ideas you have already shared.';
+
+  const submitButton = button('suggestions:submit', section.anonymous ? 'Share Anonymously' : 'Share a Suggestion')
+    .setDisabled(!enabled);
+
   return {
     embeds: [new EmbedBuilder()
       .setColor(SUGGESTIONS_COLOR)
       .setTitle('💡 Suggestions')
-      .setDescription(`Have an idea that could make the server better? Share it with the team here.\n\nUse **My Suggestions** to check what you have sent and see any team response.${privacyNote}`)
-      .setFooter({ text: 'Thanks for helping improve the community.' })
+      .setDescription(description)
+      .setFooter({ text: enabled ? 'Every idea is welcome.' : 'Please check back later.' })
       .setTimestamp()],
     components: [row(
-      button('suggestions:submit', section.anonymous ? 'Share Anonymously' : 'Share a Suggestion'),
+      submitButton,
       button('suggestions:mine:page:0', 'My Suggestions', ButtonStyle.Secondary),
     )],
   };
@@ -109,6 +149,7 @@ function memberSuggestions(guildId, userId) {
 }
 
 function buildMySuggestionsPayload(guildId, userId, page = 0) {
+  const section = suggestions.getSection(guildId);
   const records = memberSuggestions(guildId, userId);
   const pageSize = 10;
   const totalPages = Math.max(1, Math.ceil(records.length / pageSize));
@@ -118,27 +159,31 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
     out[item.status] = Number(out[item.status] || 0) + 1;
     return out;
   }, { pending: 0, approved: 0, denied: 0 });
-  const lines = pageRecords.length
-    ? pageRecords.map((item) => `${statusEmoji(item.status)} **${statusLabel(item.status)}** · ${shortDate(item.createdAt)}\n${compactPreview(item.content, 120)}`)
-    : ['You have not shared any suggestions yet.'];
-  const components = [];
 
+  const lines = pageRecords.length
+    ? pageRecords.map((item) => {
+      const privacy = item.anonymous === true ? ' · 🔒 Anonymous' : '';
+      return `${statusEmoji(item.status)} **${statusLabel(item.status, section)}** · ${shortDate(item.createdAt)}${privacy}\n${compactPreview(item.content, 120)}`;
+    })
+    : ['You have not shared any suggestions yet.'];
+
+  const components = [];
   if (pageRecords.length) {
     components.push(row(new StringSelectMenuBuilder()
       .setCustomId('suggestions:mine:select')
-      .setPlaceholder('Choose a suggestion to open')
+      .setPlaceholder('Open one of your suggestions')
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(pageRecords.map((item) => ({
-        label: `${statusEmoji(item.status)} ${statusLabel(item.status)} · ${compactPreview(item.content, 60) || 'Suggestion'}`.slice(0, 100),
-        description: `Shared ${shortDate(item.createdAt)}`.slice(0, 100),
+        label: `${statusEmoji(item.status)} ${statusLabel(item.status, section)} · ${compactPreview(item.content, 60) || 'Suggestion'}`.slice(0, 100),
+        description: `${item.anonymous === true ? 'Anonymous · ' : ''}Shared ${shortDate(item.createdAt)}`.slice(0, 100),
         value: `${item.suggestionId}|${safePage}`,
       })))));
   }
 
   components.push(row(
-    button(`suggestions:mine:page:${Math.max(0, safePage - 1)}`, 'Previous', ButtonStyle.Secondary).setDisabled(safePage === 0),
-    button(`suggestions:mine:page:${Math.min(totalPages - 1, safePage + 1)}`, 'Next', ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
+    button(`suggestions:mine:page:${Math.max(0, safePage - 1)}`, '⬅️ Previous', ButtonStyle.Secondary).setDisabled(safePage === 0),
+    button(`suggestions:mine:page:${Math.min(totalPages - 1, safePage + 1)}`, 'Next ➡️', ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
     button('suggestions:mine:close', 'Close', ButtonStyle.Secondary),
   ));
 
@@ -147,7 +192,9 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
       .setColor(SUGGESTIONS_COLOR)
       .setTitle('💡 My Suggestions')
       .setDescription([
-        `Waiting for review: **${counts.pending}** · Approved: **${counts.approved}** · Declined: **${counts.denied}**`,
+        'Your private suggestion history.',
+        '',
+        `💡 Waiting: **${counts.pending}**   ·   ✅ Approved: **${counts.approved}**   ·   ❌ Declined: **${counts.denied}**`,
         '',
         ...lines,
         '',
@@ -161,25 +208,87 @@ function buildMySuggestionsPayload(guildId, userId, page = 0) {
 }
 
 function buildMySuggestionDetail(guildId, userId, suggestionId, page = 0) {
+  const section = suggestions.getSection(guildId);
   const item = suggestions.getSuggestion(guildId, suggestionId);
   if (!item || String(item.authorId || '') !== String(userId || '')) throw new Error('That suggestion could not be found in your history.');
-  const reviewed = item.reviewedAt ? `<t:${Math.floor(new Date(item.reviewedAt).getTime() / 1000)}:F>` : 'Waiting for review';
+
+  const fields = [
+    { name: 'Status', value: `${statusEmoji(item.status)} ${statusLabel(item.status, section)}`, inline: true },
+    { name: 'Shared', value: item.anonymous === true ? '🔒 Anonymously' : 'With your name', inline: true },
+    { name: 'Submitted', value: discordTimestamp(item.createdAt, 'F'), inline: false },
+  ];
+
+  if (section.voting !== false || item.upVotes.length || item.downVotes.length) {
+    fields.push({ name: 'Community feedback', value: voteSummary(item), inline: false });
+  }
+
+  if (item.status === 'pending') {
+    fields.push({
+      name: 'Team response',
+      value: section.requireReview !== false ? 'The team has not reviewed this suggestion yet.' : 'No team decision is required for this suggestion.',
+      inline: false,
+    });
+  } else {
+    fields.push({ name: 'Decision made', value: discordTimestamp(item.reviewedAt || item.updatedAt, 'F'), inline: false });
+    fields.push({
+      name: 'Team response',
+      value: item.reviewReason || (item.status === 'approved'
+        ? 'The team approved your suggestion.'
+        : 'The team decided not to move forward with your suggestion this time.'),
+      inline: false,
+    });
+  }
+
   return {
     embeds: [new EmbedBuilder()
       .setColor(SUGGESTIONS_COLOR)
-      .setTitle(`💡 My Suggestion · ${statusLabel(item.status)}`)
+      .setTitle('💡 Your Suggestion')
       .setDescription(item.content || '_No suggestion text was provided._')
-      .addFields(
-        { name: 'Status', value: `${statusEmoji(item.status)} ${statusLabel(item.status)}`, inline: true },
-        { name: 'Community vote', value: `👍 ${item.upVotes.length}   👎 ${item.downVotes.length}`, inline: true },
-        { name: 'Reviewed', value: reviewed, inline: false },
-        ...(item.reviewReason ? [{ name: 'Team response', value: item.reviewReason, inline: false }] : []),
-      )
+      .addFields(fields)
       .setFooter({ text: 'Only you can see this.' })
       .setTimestamp(new Date(item.updatedAt || item.createdAt || Date.now()))],
     components: [row(
       button(`suggestions:mine:page:${Math.max(0, Number(page) || 0)}`, '⬅️ My Suggestions', ButtonStyle.Secondary),
       button('suggestions:mine:close', 'Close', ButtonStyle.Secondary),
+    )],
+    flags: MessageFlags.Ephemeral,
+  };
+}
+
+function buildReviewerDecisionPayload(guild, suggestionId) {
+  const section = suggestions.getSection(guild.id);
+  const item = suggestions.getSuggestion(guild.id, suggestionId);
+  if (!item) throw new Error('That suggestion could not be found.');
+  if (item.status !== 'pending') throw new Error(`This suggestion has already been ${item.status === 'approved' ? 'approved' : 'declined'}.`);
+
+  const approvedDestination = section.approvedChannelId ? `<#${section.approvedChannelId}>` : 'the original suggestion only';
+  const declinedDestination = section.deniedChannelId ? `<#${section.deniedChannelId}>` : 'the original suggestion only';
+
+  return {
+    embeds: [new EmbedBuilder()
+      .setColor(SUGGESTIONS_COLOR)
+      .setTitle('💡 Review Suggestion')
+      .setDescription(item.content || '_No suggestion text was provided._')
+      .addFields(
+        { name: 'Shared by', value: item.anonymous === true ? '🔒 Anonymous member' : item.authorId ? `<@${item.authorId}>` : 'Community member', inline: true },
+        { name: 'Community feedback', value: voteSummary(item), inline: false },
+        {
+          name: 'What happens next?',
+          value: [
+            'Choosing **Approve** or **Decline** closes the suggestion and voting.',
+            'The member will be notified privately and can see the team response in **My Suggestions**.',
+            `Approved result: ${approvedDestination}`,
+            `Declined result: ${declinedDestination}`,
+          ].join('\n'),
+          inline: false,
+        },
+      )
+      .setFooter({ text: 'Only the review team can make a decision.' })
+      .setTimestamp(new Date(item.createdAt || Date.now()))],
+    components: [row(
+      button(`suggestions:review:${item.suggestionId}:approve`, '✅ Approve', ButtonStyle.Success),
+      button(`suggestions:review:${item.suggestionId}:deny`, '❌ Decline', ButtonStyle.Danger),
+      button('suggestions:reviewClose', 'Cancel', ButtonStyle.Secondary),
     )],
     flags: MessageFlags.Ephemeral,
   };
@@ -209,8 +318,8 @@ function buildReviewModal(suggestionId, action) {
     .addComponents(row(
       new TextInputBuilder()
         .setCustomId('reason')
-        .setLabel('Message to the member (optional)')
-        .setPlaceholder(approve ? 'Let them know what happens next.' : 'Explain the decision if you would like to.')
+        .setLabel('Response to share (optional)')
+        .setPlaceholder('This will be shown with the final decision and sent to the member.')
         .setStyle(TextInputStyle.Paragraph)
         .setMaxLength(500)
         .setRequired(false),
@@ -219,7 +328,7 @@ function buildReviewModal(suggestionId, action) {
 
 function overviewDescription(section, enabled) {
   return [
-    'Choose where members send ideas, who can review them, and how suggestions work for your community.',
+    'Choose where members share ideas, who can review them, and how suggestions work for your community.',
     '',
     `**Suggestions:** ${enabled ? 'On ✅' : 'Off ❌'}`,
     '',
@@ -232,7 +341,7 @@ function overviewDescription(section, enabled) {
     '',
     '**Member options**',
     `• Community voting: ${section.voting !== false ? 'On ✅' : 'Off ❌'}`,
-    `• Team review before decision: ${section.requireReview !== false ? 'On ✅' : 'Off ❌'}`,
+    `• Team review: ${section.requireReview !== false ? 'On ✅' : 'Off ❌'}`,
     `• Hide member names: ${section.anonymous === true ? 'On ✅' : 'Off ❌'}`,
     '',
     '**Activity**',
@@ -288,12 +397,12 @@ function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', p
       .setColor(SUGGESTIONS_COLOR)
       .setTitle('💡 Suggestions · Decision Channels')
       .setDescription([
-        'You can optionally post the final result of a suggestion into separate channels.',
+        'You can optionally post approved and declined suggestions into separate channels.',
         '',
         `**Approved suggestions:** ${formatChannel(section.approvedChannelId)}`,
         `**Declined suggestions:** ${formatChannel(section.deniedChannelId)}`,
         '',
-        'Leave either one unset if you only want the original suggestion message updated.',
+        'If a channel is left unset, the original suggestion is still updated with the final decision.',
       ].join('\n'))
       .setFooter({ text: `Opened by ${memberDisplayName}` })
       .setTimestamp();
@@ -312,7 +421,7 @@ function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', p
     .setTimestamp();
 
   return { embeds: [embed], components: [
-    row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:submitChannel').setPlaceholder('Where members send suggestions').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
+    row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:submitChannel').setPlaceholder('Where members share suggestions').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
     row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:reviewChannel').setPlaceholder('Where the team reviews suggestions').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
     row(
       button('admin:suggestions:reviewers', '👥 Review Team', ButtonStyle.Primary),
@@ -336,9 +445,18 @@ async function fetchDeploymentMessage(guild, deployment) {
   return channel.messages.fetch(deployment.messageId).catch(() => null);
 }
 
+async function refreshDeployedPanel(guild) {
+  if (!guild?.id) return null;
+  const section = suggestions.getSection(guild.id);
+  const existing = await fetchDeploymentMessage(guild, section.deployment);
+  if (!existing?.editable) return null;
+  await existing.edit(buildSubmitPanelPayload(guild.id));
+  return existing;
+}
+
 async function deploySubmitPanel(guild) {
   const section = tracking.assertEnabled(guild?.id);
-  if (!section.submitChannelId) throw new Error('Choose where members should send suggestions first.');
+  if (!section.submitChannelId) throw new Error('Choose where members should share suggestions first.');
 
   const channel = await tracking.resolveSendableChannel(guild, section.submitChannelId, 'suggestions channel', { requireHistory: true });
   const payload = buildSubmitPanelPayload(guild.id);
@@ -377,9 +495,11 @@ module.exports = {
   buildSubmitPanelPayload,
   buildMySuggestionsPayload,
   buildMySuggestionDetail,
+  buildReviewerDecisionPayload,
   buildSubmitModal,
   buildReviewModal,
   buildReviewerRolesPanel,
   buildSuggestionsAdminPanel,
+  refreshDeployedPanel,
   deploySubmitPanel,
 };
