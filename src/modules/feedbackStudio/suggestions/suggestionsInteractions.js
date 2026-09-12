@@ -1,11 +1,25 @@
 'use strict';
 
-const { MessageFlags } = require('discord.js');
+const {
+  MessageFlags,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelSelectMenuBuilder,
+  ChannelType,
+} = require('discord.js');
 const suggestions = require('./suggestions');
 const panel = require('./suggestionsPanel');
 const tracking = require('./suggestionsTracking');
 const panelNavigation = require('../../../core/ui/panelNavigation');
-const { setModuleEnabled } = require('../../../core/guild/guildManager');
+const { setModuleEnabled, isModuleEnabled } = require('../../../core/guild/guildManager');
+
+const SUGGESTIONS_COLOR = panel.SUGGESTIONS_COLOR || 0xfee75c;
+const row = (...components) => new ActionRowBuilder().addComponents(...components);
+const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style);
+const formatChannel = (id) => id ? `<#${id}>` : '*Not set*';
+const formatRoles = (ids = []) => Array.isArray(ids) && ids.filter(Boolean).length ? ids.filter(Boolean).map((id) => `<@&${id}>`).join(', ') : '*None selected*';
 
 async function safeReply(interaction, content) {
   const text = String(content || 'That suggestion action could not be completed.').slice(0, 1900);
@@ -52,6 +66,88 @@ async function refreshManagementRoleCache(guild) {
   }
 }
 
+function buildOverviewPanel(guild, memberName) {
+  const section = suggestions.getSection(guild.id);
+  const enabled = isModuleEnabled(guild.id, 'suggestions');
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions')
+    .setDescription([
+      'Set up where suggestions go and who manages them. Use **Settings** for module-wide behaviour.', '',
+      `**Status:** ${enabled ? '🟢 Enabled' : '🔴 Disabled'}`, '',
+      '**Channels**',
+      `• Public suggestions: ${formatChannel(section.submitChannelId)}`,
+      `• Team discussion: ${formatChannel(section.reviewChannelId)}`,
+      `• Audit log: ${formatChannel(section.logChannelId)}`, '',
+      '**Management team**',
+      `• ${formatRoles(section.reviewerRoleIds)}`, '',
+      '**Activity**',
+      `• ${section.analytics.submitted} submitted · ${section.analytics.discussing} discussing · ${section.analytics.approved} approved`,
+      `• ${section.analytics.implemented} implemented · ${section.analytics.denied} declined`,
+    ].join('\n'))
+    .setFooter({ text: `Opened by ${memberName}` })
+    .setTimestamp();
+
+  return {
+    embeds: [embed],
+    components: [
+      row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:submitChannel').setPlaceholder('Public suggestions channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
+      row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:reviewChannel').setPlaceholder('Private team discussion channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
+      row(
+        button('admin:suggestions:reviewers', '👥 Management Team', ButtonStyle.Primary),
+        button('admin:suggestions:destinations', '📬 Outcomes & Logs', ButtonStyle.Primary),
+        button('admin:suggestions:settings', '⚙️ Settings', ButtonStyle.Secondary),
+      ),
+      row(button('admin:suggestions:deploy', '🚀 Publish Panel', ButtonStyle.Success)),
+      row(button('admin:modules', '⬅️ Back to Modules', ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function buildSettingsPanel(guild, memberName) {
+  const section = suggestions.getSection(guild.id);
+  const enabled = isModuleEnabled(guild.id, 'suggestions');
+  const voting = section.voting !== false;
+  const review = section.requireReview !== false;
+  const anonymous = section.anonymous === true;
+
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions · Settings')
+    .setDescription([
+      'Control how the Suggestions module behaves across the server.', '',
+      '**Module**',
+      `• Suggestions: ${enabled ? '✅ Enabled' : '❌ Disabled'}`, '',
+      '**Community**',
+      `• Community voting: ${voting ? '✅ Enabled' : '❌ Disabled'}`,
+      `• Public identity: ${anonymous ? '🔒 Anonymous' : '👤 Named'}`, '',
+      '**Management workflow**',
+      `• Management review: ${review ? '✅ Enabled' : '❌ Disabled'}`, '',
+      '*These are global settings. Changes apply to the Suggestions module across this server.*',
+    ].join('\n'))
+    .setFooter({ text: `Opened by ${memberName}` })
+    .setTimestamp();
+
+  return {
+    embeds: [embed],
+    components: [
+      row(button(enabled ? 'admin:suggestions:disable' : 'admin:suggestions:enable', enabled ? '⏸️ Disable Suggestions' : '▶️ Enable Suggestions', enabled ? ButtonStyle.Danger : ButtonStyle.Success)),
+      row(
+        button('admin:suggestions:toggleVoting', voting ? '⏸️ Disable Voting' : '▶️ Enable Voting', voting ? ButtonStyle.Secondary : ButtonStyle.Success),
+        button('admin:suggestions:toggleReview', review ? '⏸️ Disable Review' : '▶️ Enable Review', review ? ButtonStyle.Secondary : ButtonStyle.Success),
+      ),
+      row(button('admin:suggestions:toggleAnonymous', anonymous ? '👤 Show Member Names' : '🔒 Make Suggestions Anonymous', ButtonStyle.Secondary)),
+      row(button('admin:suggestions:overview', '⬅️ Back to Suggestions', ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function buildAdminPanel(guild, memberName, page = 'overview') {
+  if (page === 'overview') return buildOverviewPanel(guild, memberName);
+  if (page === 'settings') return buildSettingsPanel(guild, memberName);
+  return panel.buildSuggestionsAdminPanel(guild, memberName, page);
+}
+
 async function handleSuggestionsAdminInteraction(interaction) {
   const id = String(interaction?.customId || '');
   if (!id.startsWith('admin:suggestions')) return false;
@@ -85,14 +181,17 @@ async function handleSuggestionsAdminInteraction(interaction) {
     }
 
     if (id === 'admin:suggestions' || id === 'admin:suggestions:overview') {
-      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'overview'));
+    }
+    if (id === 'admin:suggestions:settings') {
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     }
     if (id === 'admin:suggestions:reviewers') {
       await refreshManagementRoleCache(interaction.guild);
-      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'reviewers'));
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'reviewers'));
     }
     if (id === 'admin:suggestions:destinations') {
-      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'destinations'));
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'destinations'));
     }
 
     if (interaction.isChannelSelectMenu?.()) {
@@ -101,34 +200,40 @@ async function handleSuggestionsAdminInteraction(interaction) {
       if (['submitChannel', 'reviewChannel', 'approvedChannel', 'deniedChannel', 'logChannel'].includes(property)) {
         save((section) => ({ ...section, [`${property}Id`]: value }));
         const page = ['approvedChannel', 'deniedChannel', 'logChannel'].includes(property) ? 'destinations' : 'overview';
-        return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, page));
+        return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, page));
       }
     } else if (id === 'admin:suggestions:enable') {
       await interaction.deferUpdate();
       setModuleEnabled(interaction.guild.id, 'suggestions', true, interaction.guild);
       await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true, suggestionMessages: true });
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:disable') {
       await interaction.deferUpdate();
       setModuleEnabled(interaction.guild.id, 'suggestions', false, interaction.guild);
       await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true, suggestionMessages: true });
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleVoting') {
       await interaction.deferUpdate();
       save((section) => ({ ...section, voting: !section.voting }));
       await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleReview') {
       await interaction.deferUpdate();
       save((section) => ({ ...section, requireReview: !section.requireReview }));
       await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleAnonymous') {
       await interaction.deferUpdate();
       save((section) => ({ ...section, anonymous: !section.anonymous }));
       await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true });
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:deploy') {
       await interaction.deferUpdate();
       await panel.deploySubmitPanel(interaction.guild);
+      return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'overview'));
     }
 
-    return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
+    return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'overview'));
   } catch (error) {
     console.error('[Suggestions] Admin interaction failed:', error);
     await safeReply(interaction, `❌ Suggestions could not be updated: ${error.message || 'Please try again.'}`);
@@ -210,7 +315,6 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
-    // Legacy public management button support for messages created before the managed workflow update.
     if (interaction.isButton?.() && parts[1] === 'reviewOpen') {
       const suggestionId = suggestions.cleanSuggestionId(parts[2]);
       if (!suggestionId) throw new Error('That review option is no longer available.');
@@ -228,7 +332,6 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
-    // Legacy approve/deny controls remain valid for old management messages.
     if (interaction.isButton?.() && parts[1] === 'review') {
       if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
