@@ -60,10 +60,10 @@ function toOptionalPositiveInteger(value, fallback = null) {
 function normalizeSection(section = {}) {
   const startingNumber = toInteger(section.startingNumber, DEFAULTS.startingNumber);
   const baseline = startingNumber - 1;
-  const currentCount = toInteger(section.currentCount, baseline, { min: baseline });
+  const currentCount = toInteger(section.currentCount, baseline, { min: -1 });
   const highestCount = Math.max(
     currentCount,
-    toInteger(section.highestCount, currentCount, { min: baseline }),
+    toInteger(section.highestCount, currentCount, { min: -1 }),
   );
 
   return {
