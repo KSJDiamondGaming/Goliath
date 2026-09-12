@@ -5,83 +5,138 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const stats = require('./stats');
 
-const PANEL_COLOR = '#5865F2';
+const PANEL_COLOR = 0x5865F2;
+const TYPE_LABELS = Object.freeze({
+  channels: ['📁', 'Channels'],
+  countdown: ['⏳', 'Countdown / Timer'],
+  datetime: ['📅', 'Date & Time'],
+  members: ['👥', 'Members'],
+  status: ['🟢', 'Members with Status'],
+  role: ['🎭', 'Members in Role'],
+  roles: ['🏷️', 'Roles'],
+  voice: ['🔊', 'Members in Voice'],
+  messages: ['💬', 'Message Count'],
+  voiceMinutes: ['🎙️', 'Voice Minutes'],
+  joins: ['📥', 'Member Joins'],
+  leaves: ['📤', 'Member Leaves'],
+  boosts: ['🚀', 'Server Boosts'],
+  emojis: ['😀', 'Emojis'],
+});
 
-function button(customId, label, style = ButtonStyle.Primary) {
-  return new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style);
+function button(customId, label, style = ButtonStyle.Primary, disabled = false) {
+  return new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style).setDisabled(disabled);
 }
 
 function row(...components) {
   return new ActionRowBuilder().addComponents(...components);
 }
 
-function getMemberDisplayName(interaction) {
-  return interaction.member?.displayName || interaction.user?.displayName || interaction.user?.username || 'Unknown User';
+function select(customId, placeholder, options) {
+  return new StringSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).addOptions(options.slice(0, 25));
 }
 
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString('en-GB');
+function memberName(interaction) {
+  return interaction.member?.displayName || interaction.user?.displayName || interaction.user?.username || 'Management';
 }
 
-function formatCounterList(counters = []) {
-  if (!counters.length) return 'No counter channels configured yet.';
-  return counters.map((counter, index) => {
-    const template = counter.template || stats.counters.defaultTemplate(counter.type);
-    return `**${index + 1}.** <#${counter.channelId}> — \`${counter.type}\` — \`${template}\``;
-  }).join('\n').slice(0, 1024);
+function summaryText(docks) {
+  if (!docks.length) return 'No counters are set up yet. Use **Quick Setup** or **Create Counter** below.';
+  return docks.slice(0, 12).map((dock) => {
+    const status = dock.enabled ? '🟢' : '⚫';
+    const types = dock.segments.map((segment) => TYPE_LABELS[segment.type]?.[1] || segment.type).join(' + ');
+    return `${status} **${dock.name || 'Counter'}** — ${types}${dock.channelId ? ` — <#${dock.channelId}>` : ''}`;
+  }).join('\n');
 }
 
-function buildStatsAdminPanel(guild, memberDisplayName = 'Unknown User') {
+function buildStatsAdminPanel(guild, displayName = 'Management') {
   const summary = stats.getSummary(guild.id);
-  const counters = stats.counters.listCounters(guild.id);
+  const docks = stats.counters.listCounters(guild.id);
+  const active = docks.filter((dock) => dock.enabled).length;
 
   const embed = new EmbedBuilder()
-    .setColor(summary.enabled ? 0x57f287 : PANEL_COLOR)
-    .setTitle('📊 Server Stats')
+    .setColor(summary.enabled ? 0x57F287 : PANEL_COLOR)
+    .setTitle('📊 Server Counters')
     .setDescription([
-      'Configure counter channels and server activity tracking from the Admin Menu.',
+      'Create live counter channels for members, statuses, roles, voice, date/time and more.',
       '',
-      `**Tracking:** ${summary.enabled ? 'Enabled ✅' : 'Disabled ❌'}`,
-      `**Counters:** \`${counters.length}\` configured`,
+      `**Stats:** ${summary.enabled ? 'Enabled ✅' : 'Disabled ❌'}`,
+      `**Counters:** ${active} active · ${docks.length} saved`,
     ].join('\n'))
+    .addFields({ name: 'Your Counters', value: summaryText(docks).slice(0, 1024) })
+    .setFooter({ text: `Opened by ${displayName}` })
+    .setTimestamp();
+
+  const typeOptions = Object.entries(TYPE_LABELS).map(([value, [emoji, label]]) => ({
+    label,
+    value,
+    emoji,
+    description: value === 'status' ? 'Online, idle, DND or offline members' : value === 'role' ? 'Count members who have selected roles' : `Create a ${label.toLowerCase()} counter`,
+  }));
+
+  const components = [
+    row(
+      button('admin:stats:setup', '⚡ Quick Setup', ButtonStyle.Success),
+      button('admin:stats:refresh', '🔄 Refresh', ButtonStyle.Primary),
+      button(summary.enabled ? 'admin:stats:disable' : 'admin:stats:enable', summary.enabled ? '⏸️ Disable Stats' : '▶️ Enable Stats', summary.enabled ? ButtonStyle.Secondary : ButtonStyle.Success)
+    ),
+    row(select('admin:stats:create', '➕ Create a counter…', typeOptions)),
+  ];
+
+  if (docks.length) {
+    components.push(row(select('admin:stats:manage', '⚙️ Manage an existing counter…', docks.map((dock) => ({
+      label: String(dock.name || 'Counter').slice(0, 100),
+      value: dock.id,
+      description: `${dock.enabled ? 'Active' : 'Off'} · ${dock.segments.map((segment) => TYPE_LABELS[segment.type]?.[1] || segment.type).join(' + ')}`.slice(0, 100),
+    })))));
+  }
+
+  components.push(row(button('admin:studio:utilityStudio', '⬅️ Back', ButtonStyle.Secondary)));
+  return { embeds: [embed], components };
+}
+
+function buildManagePanel(guild, dock, displayName = 'Management') {
+  const types = dock.segments.map((segment) => `${TYPE_LABELS[segment.type]?.[0] || '•'} ${TYPE_LABELS[segment.type]?.[1] || segment.type}`).join('\n');
+  const embed = new EmbedBuilder()
+    .setColor(dock.enabled ? 0x57F287 : 0x6B7280)
+    .setTitle(`⚙️ ${dock.name || 'Counter'}`)
+    .setDescription(dock.channelId ? `Counter channel: <#${dock.channelId}>` : 'This counter is saved but currently turned off.')
     .addFields(
-      {
-        name: 'Overview',
-        value: [
-          `Messages: \`${formatNumber(summary.totals.messages)}\``,
-          `Voice Minutes: \`${formatNumber(summary.totals.voiceMinutes)}\``,
-          `Joins: \`${formatNumber(summary.totals.joins)}\``,
-          `Leaves: \`${formatNumber(summary.totals.leaves)}\``,
-        ].join('\n'),
-        inline: true,
-      },
-      {
-        name: 'Counter Channels',
-        value: formatCounterList(counters),
-        inline: false,
-      }
+      { name: 'Status', value: dock.enabled ? '🟢 On' : '⚫ Off', inline: true },
+      { name: 'Updates', value: `Every ${dock.frequencyMinutes} minutes`, inline: true },
+      { name: 'Counters inside', value: types || 'None', inline: false },
+      { name: 'Channel text', value: `\`${dock.template}\``, inline: false },
+      { name: 'More editing', value: 'Use the Goliath dashboard to change roles, statuses, timezone, countdowns, goals, channel filters or combine up to four counters.', inline: false }
     )
-    .setFooter({ text: `Requested by ${memberDisplayName}` })
+    .setFooter({ text: `Opened by ${displayName}` })
     .setTimestamp();
 
   return {
     embeds: [embed],
     components: [
       row(
-        button('admin:stats:setup', '⚡ Setup Counters', ButtonStyle.Success),
-        button('admin:stats:refresh', '🔄 Refresh', ButtonStyle.Primary),
-        button(summary.enabled ? 'admin:stats:disable' : 'admin:stats:enable', summary.enabled ? '⏸️ Disable' : '▶️ Enable', summary.enabled ? ButtonStyle.Secondary : ButtonStyle.Success)
-      ),
-      row(
-        button('admin:stats:view', '📊 View Overview', ButtonStyle.Primary),
-        button('admin:stats:counters', '📋 List Counters', ButtonStyle.Secondary),
-        button('admin:modules', '⬅️ Back to Modules', ButtonStyle.Secondary)
+        button(`admin:stats:toggle:${dock.id}`, dock.enabled ? '⏸️ Turn Off' : '▶️ Turn On', dock.enabled ? ButtonStyle.Secondary : ButtonStyle.Success),
+        button(`admin:stats:delete:${dock.id}`, '🗑️ Delete', ButtonStyle.Danger),
+        button('admin:stats', '⬅️ Back', ButtonStyle.Secondary)
       ),
     ],
+  };
+}
+
+function buildDeleteConfirmation(dock) {
+  return {
+    embeds: [new EmbedBuilder()
+      .setColor(0xED4245)
+      .setTitle('🗑️ Delete Counter?')
+      .setDescription(`This will permanently remove **${dock.name || 'Counter'}** and its Discord counter channel.\n\nThis cannot be undone.`)],
+    components: [row(
+      button(`admin:stats:delete-confirm:${dock.id}`, 'Delete Counter', ButtonStyle.Danger),
+      button(`admin:stats:open:${dock.id}`, 'Cancel', ButtonStyle.Secondary)
+    )],
   };
 }
 
@@ -92,33 +147,78 @@ async function safeUpdate(interaction, payload) {
 }
 
 async function handleStatsAdminInteraction(interaction) {
-  if (!interaction?.isButton?.()) return false;
-  if (!String(interaction.customId || '').startsWith('admin:stats')) return false;
+  const id = String(interaction?.customId || '');
+  if (!id.startsWith('admin:stats')) return false;
+  const displayName = memberName(interaction);
 
-  const memberDisplayName = getMemberDisplayName(interaction);
+  if (id === 'admin:stats') return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
 
-  if (interaction.customId === 'admin:stats') return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, memberDisplayName));
+  if (interaction.isStringSelectMenu?.() && id === 'admin:stats:create') {
+    await interaction.deferUpdate().catch(() => null);
+    const type = interaction.values?.[0];
+    const [emoji, label] = TYPE_LABELS[type] || ['📊', 'Counter'];
+    stats.setEnabled(interaction.guild.id, true, interaction.guild);
+    const dock = await stats.counters.createDock(interaction.guild, {
+      name: label,
+      template: `${emoji} ${label}: {value}`,
+      segments: [{ type, options: type === 'status' ? { statuses: ['online'] } : {} }],
+      source: 'panel',
+    }, interaction.guild);
+    return safeUpdate(interaction, buildManagePanel(interaction.guild, dock, displayName));
+  }
 
-  if (interaction.customId === 'admin:stats:setup') {
+  if (interaction.isStringSelectMenu?.() && id === 'admin:stats:manage') {
+    const dock = stats.counters.listCounters(interaction.guild.id).find((item) => item.id === interaction.values?.[0]);
+    if (!dock) return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
+    return safeUpdate(interaction, buildManagePanel(interaction.guild, dock, displayName));
+  }
+
+  if (!interaction.isButton?.()) return false;
+
+  if (id === 'admin:stats:setup') {
     await interaction.deferUpdate().catch(() => null);
     stats.setEnabled(interaction.guild.id, true, interaction.guild);
     await stats.counters.createCounterSuite(interaction.guild);
-    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, memberDisplayName));
+    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
   }
 
-  if (interaction.customId === 'admin:stats:refresh') {
+  if (id === 'admin:stats:refresh') {
     await interaction.deferUpdate().catch(() => null);
     await stats.counters.refreshCounters(interaction.guild);
-    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, memberDisplayName));
+    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
   }
 
-  if (interaction.customId === 'admin:stats:enable' || interaction.customId === 'admin:stats:disable') {
-    stats.setEnabled(interaction.guild.id, interaction.customId.endsWith(':enable'), interaction.guild);
-    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, memberDisplayName));
+  if (id === 'admin:stats:enable' || id === 'admin:stats:disable') {
+    stats.setEnabled(interaction.guild.id, id.endsWith(':enable'), interaction.guild);
+    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
   }
 
-  if (interaction.customId === 'admin:stats:view' || interaction.customId === 'admin:stats:counters') {
-    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, memberDisplayName));
+  if (id.startsWith('admin:stats:open:')) {
+    const dockId = id.slice('admin:stats:open:'.length);
+    const dock = stats.counters.listCounters(interaction.guild.id).find((item) => item.id === dockId);
+    return safeUpdate(interaction, dock ? buildManagePanel(interaction.guild, dock, displayName) : buildStatsAdminPanel(interaction.guild, displayName));
+  }
+
+  if (id.startsWith('admin:stats:toggle:')) {
+    await interaction.deferUpdate().catch(() => null);
+    const dockId = id.slice('admin:stats:toggle:'.length);
+    const dock = stats.counters.listCounters(interaction.guild.id).find((item) => item.id === dockId);
+    if (!dock) return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
+    const updated = await stats.counters.setDockEnabled(interaction.guild, dock.id, !dock.enabled, interaction.guild);
+    return safeUpdate(interaction, buildManagePanel(interaction.guild, updated, displayName));
+  }
+
+  if (id.startsWith('admin:stats:delete-confirm:')) {
+    await interaction.deferUpdate().catch(() => null);
+    const dockId = id.slice('admin:stats:delete-confirm:'.length);
+    await stats.counters.deleteDock(interaction.guild, dockId, interaction.guild);
+    return safeUpdate(interaction, buildStatsAdminPanel(interaction.guild, displayName));
+  }
+
+  if (id.startsWith('admin:stats:delete:')) {
+    const dockId = id.slice('admin:stats:delete:'.length);
+    const dock = stats.counters.listCounters(interaction.guild.id).find((item) => item.id === dockId);
+    return safeUpdate(interaction, dock ? buildDeleteConfirmation(dock) : buildStatsAdminPanel(interaction.guild, displayName));
   }
 
   return false;
