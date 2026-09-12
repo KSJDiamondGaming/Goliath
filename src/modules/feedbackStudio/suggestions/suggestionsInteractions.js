@@ -8,6 +8,10 @@ const {
   ButtonStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const suggestions = require('./suggestions');
 const panel = require('./suggestionsPanel');
@@ -16,6 +20,7 @@ const panelNavigation = require('../../../core/ui/panelNavigation');
 const { setModuleEnabled, isModuleEnabled } = require('../../../core/guild/guildManager');
 
 const SUGGESTIONS_COLOR = panel.SUGGESTIONS_COLOR || 0xfee75c;
+const ADMIN_RECORD_PAGE_SIZE = 20;
 const row = (...components) => new ActionRowBuilder().addComponents(...components);
 const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style);
 const formatChannel = (id) => id ? `<#${id}>` : '⚠️ Not set';
@@ -68,6 +73,27 @@ async function refreshManagementRoleCache(guild) {
   }
 }
 
+async function fetchStoredMessage(guild, channelId, messageId) {
+  if (!guild || !channelId || !messageId) return null;
+  const channel = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel?.messages?.fetch) return null;
+  return channel.messages.fetch(messageId).catch(() => null);
+}
+
+async function reconcilePublishedPanel(guild) {
+  const section = suggestions.getSection(guild.id);
+  const deployment = section.deployment || {};
+  if (!deployment.channelId || !deployment.messageId) return false;
+  const message = await fetchStoredMessage(guild, deployment.channelId, deployment.messageId);
+  if (message) return true;
+  suggestions.saveDeployment(guild.id, {
+    channelId: null,
+    messageId: null,
+    deployedAt: null,
+  }, guild);
+  return false;
+}
+
 function workflowReadiness(section, enabled) {
   const reviewEnabled = section.requireReview !== false;
   const missing = [];
@@ -99,7 +125,7 @@ function buildOverviewPanel(guild, memberName) {
   const embed = new EmbedBuilder()
     .setColor(SUGGESTIONS_COLOR)
     .setTitle('💡 Suggestions · Control Centre')
-    .setDescription('Set up and manage the suggestion workflow from one place. The important day-to-day controls stay here; global behaviour lives under **Settings**.')
+    .setDescription('Set up and manage the suggestion workflow from one place. Use **Manage Suggestions** to view, edit or clean up stored submissions.')
     .addFields(
       {
         name: 'Current status',
@@ -155,6 +181,7 @@ function buildOverviewPanel(guild, memberName) {
         .setMaxValues(1)
         .setDisabled(!readiness.reviewEnabled)),
       row(
+        button('admin:suggestions:records:page:0', '🗂️ Manage Suggestions', ButtonStyle.Primary),
         button('admin:suggestions:reviewers', '👥 Management Team', ButtonStyle.Primary),
         button('admin:suggestions:destinations', '📬 Outcomes & Logs', ButtonStyle.Primary),
         button('admin:suggestions:settings', '⚙️ Settings', ButtonStyle.Secondary),
@@ -325,6 +352,242 @@ function buildDestinationsPanel(guild, memberName) {
   };
 }
 
+function suggestionAdminRecords(guildId) {
+  return Object.values(suggestions.getSection(guildId).suggestions || {})
+    .filter((item) => item?.suggestionId)
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+}
+
+function shortRecordDate(value) {
+  const date = new Date(value || Date.now());
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+    : 'Unknown date';
+}
+
+function buildSuggestionRecordsPanel(guild, memberName, page = 0) {
+  const records = suggestionAdminRecords(guild.id);
+  const totalPages = Math.max(1, Math.ceil(records.length / ADMIN_RECORD_PAGE_SIZE));
+  const safePage = Math.min(Math.max(0, Number(page) || 0), totalPages - 1);
+  const visible = records.slice(safePage * ADMIN_RECORD_PAGE_SIZE, (safePage + 1) * ADMIN_RECORD_PAGE_SIZE);
+  const section = suggestions.getSection(guild.id);
+
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions · Manage Suggestions')
+    .setDescription([
+      'Every submitted suggestion stored by Goliath is listed here, even if its Discord message was deleted manually.',
+      '',
+      `**Stored records:** ${records.length}`,
+      `**Discussing:** ${section.analytics.discussing} · **Approved:** ${section.analytics.approved} · **Implemented:** ${section.analytics.implemented} · **Declined:** ${section.analytics.denied}`,
+      '',
+      records.length
+        ? 'Choose a suggestion below to inspect its Discord messages, edit it, repair missing messages or remove stale backend data.'
+        : 'There are no stored suggestion records.',
+    ].join('\n'))
+    .setFooter({ text: `Page ${safePage + 1} of ${totalPages} · Opened by ${memberName}` })
+    .setTimestamp();
+
+  const components = [];
+  if (visible.length) {
+    components.push(row(new StringSelectMenuBuilder()
+      .setCustomId(`admin:suggestions:records:select:${safePage}`)
+      .setPlaceholder('Choose a stored suggestion')
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(visible.map((item) => ({
+        label: `${panel.statusEmoji(item.status)} ${item.reference} · ${item.title}`.slice(0, 100),
+        description: `${panel.statusLabel(item.status, section)} · ${shortRecordDate(item.createdAt)}`.slice(0, 100),
+        value: item.suggestionId,
+      })))));
+  }
+  if (totalPages > 1) {
+    components.push(row(
+      button(`admin:suggestions:records:page:${Math.max(0, safePage - 1)}`, '⬅️ Previous', ButtonStyle.Secondary).setDisabled(safePage === 0),
+      button(`admin:suggestions:records:page:${Math.min(totalPages - 1, safePage + 1)}`, 'Next ➡️', ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1),
+    ));
+  }
+  components.push(row(button('admin:suggestions:overview', '⬅️ Back to Control Centre', ButtonStyle.Secondary)));
+  return { embeds: [embed], components };
+}
+
+async function buildSuggestionRecordDetail(guild, memberName, suggestionId, page = 0) {
+  const item = suggestions.getSuggestion(guild.id, suggestionId);
+  if (!item) return buildSuggestionRecordsPanel(guild, memberName, page);
+  const section = suggestions.getSection(guild.id);
+  const publicMessage = await fetchStoredMessage(guild, item.channelId, item.messageId);
+  const reviewMessage = await fetchStoredMessage(guild, item.reviewChannelId, item.reviewMessageId);
+  const publicStatus = item.channelId && item.messageId
+    ? (publicMessage ? `✅ Live in ${formatChannel(item.channelId)}` : `⚠️ Missing from ${formatChannel(item.channelId)}`)
+    : '⚪ No public message linked';
+  const reviewStatus = item.reviewChannelId && item.reviewMessageId
+    ? (reviewMessage ? `✅ Live in ${formatChannel(item.reviewChannelId)}` : `⚠️ Missing from ${formatChannel(item.reviewChannelId)}`)
+    : (section.requireReview !== false ? '⚪ No management message linked' : '⏸️ Management review is disabled');
+
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle(`💡 ${item.reference} · ${item.title}`)
+    .setDescription(item.content || '_No suggestion details were provided._')
+    .addFields(
+      { name: 'Status', value: `${panel.statusEmoji(item.status)} ${panel.statusLabel(item.status, section)}`, inline: true },
+      { name: 'Submitted by', value: item.authorId ? `<@${item.authorId}>${item.anonymous ? ' · 🔒 hidden publicly' : ''}` : 'Unknown member', inline: true },
+      { name: 'Created', value: shortRecordDate(item.createdAt), inline: true },
+      { name: 'Public Discord message', value: publicStatus, inline: false },
+      { name: 'Management Discord message', value: reviewStatus, inline: false },
+      { name: 'Stored votes', value: `👍 ${item.upVotes?.length || 0} · 👎 ${item.downVotes?.length || 0}`, inline: true },
+      { name: 'Backend record', value: '✅ Stored in Goliath', inline: true },
+    )
+    .setFooter({ text: `Stored suggestion management · Opened by ${memberName}` })
+    .setTimestamp(new Date(item.updatedAt || item.createdAt || Date.now()));
+
+  return {
+    embeds: [embed],
+    components: [
+      row(
+        button(`admin:suggestions:recordEdit:${item.suggestionId}:${page}`, '📝 Edit', ButtonStyle.Primary),
+        button(`admin:suggestions:recordRefresh:${item.suggestionId}:${page}`, '🛠️ Repair Messages', ButtonStyle.Secondary),
+      ),
+      row(
+        button(`admin:suggestions:recordDeleteMessages:${item.suggestionId}:${page}`, '🗑️ Delete Discord Messages', ButtonStyle.Danger),
+        button(`admin:suggestions:recordRemove:${item.suggestionId}:${page}`, '🧹 Remove Goliath Record', ButtonStyle.Danger),
+      ),
+      row(button(`admin:suggestions:records:page:${page}`, '⬅️ Back to Stored Suggestions', ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function buildDeleteConfirmation(guild, memberName, suggestionId, page = 0, mode = 'record') {
+  const item = suggestions.getSuggestion(guild.id, suggestionId);
+  if (!item) return buildSuggestionRecordsPanel(guild, memberName, page);
+  const removeRecord = mode === 'record';
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle(removeRecord ? '⚠️ Remove Goliath Suggestion Record?' : '⚠️ Delete Suggestion Messages?')
+    .setDescription(removeRecord
+      ? `This permanently removes **${item.reference} · ${item.title}** from Goliath's stored Suggestions data.\n\nUse this when the Discord message was deleted manually or the record is no longer needed. The Submitted count will update immediately.\n\n**This does not delete any Discord messages that may still exist.**`
+      : `This deletes the public and private management Discord messages for **${item.reference} · ${item.title}**, where Goliath can still access them.\n\nThe backend record will remain so you can edit, inspect or remove it separately.`)
+    .setFooter({ text: `Confirmation · Opened by ${memberName}` })
+    .setTimestamp();
+
+  return {
+    embeds: [embed],
+    components: [
+      row(
+        button(
+          `${removeRecord ? 'admin:suggestions:recordRemoveConfirm' : 'admin:suggestions:recordDeleteMessagesConfirm'}:${item.suggestionId}:${page}`,
+          removeRecord ? '🧹 Yes, Remove Record' : '🗑️ Yes, Delete Messages',
+          ButtonStyle.Danger,
+        ),
+        button(`admin:suggestions:record:${item.suggestionId}:${page}`, 'Cancel', ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+function buildRecordEditModal(item, page = 0) {
+  return new ModalBuilder()
+    .setCustomId(`admin:suggestions:recordEditModal:${item.suggestionId}:${page}`)
+    .setTitle('Edit Stored Suggestion')
+    .addComponents(
+      row(new TextInputBuilder()
+        .setCustomId('title')
+        .setLabel('Suggestion name')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(3)
+        .setMaxLength(100)
+        .setRequired(true)
+        .setValue(String(item.title || '').slice(0, 100))),
+      row(new TextInputBuilder()
+        .setCustomId('content')
+        .setLabel('Suggestion details')
+        .setStyle(TextInputStyle.Paragraph)
+        .setMinLength(5)
+        .setMaxLength(1800)
+        .setRequired(true)
+        .setValue(String(item.content || '').slice(0, 1800))),
+    );
+}
+
+function removeStoredSuggestion(guild, suggestionId) {
+  const id = suggestions.cleanSuggestionId(suggestionId);
+  if (!id) return false;
+  const section = suggestions.getSection(guild.id);
+  if (!section.suggestions?.[id]) return false;
+  const nextSuggestions = { ...section.suggestions };
+  delete nextSuggestions[id];
+  suggestions.saveSection(guild.id, {
+    ...section,
+    suggestions: nextSuggestions,
+    updatedAt: suggestions.now(),
+  }, guild);
+  return true;
+}
+
+async function repairSuggestionMessages(guild, suggestionId) {
+  let item = suggestions.getSuggestion(guild.id, suggestionId);
+  if (!item) throw new Error('That stored suggestion could not be found.');
+  const section = suggestions.getSection(guild.id);
+  const enabled = isModuleEnabled(guild.id, 'suggestions');
+
+  let publicMessage = await fetchStoredMessage(guild, item.channelId, item.messageId);
+  if (!publicMessage) {
+    if (!section.submitChannelId) throw new Error('Set the public suggestions channel before repairing this suggestion.');
+    const publicChannel = await tracking.resolveSendableChannel(
+      guild,
+      section.submitChannelId,
+      'public suggestions channel',
+      { requireHistory: true },
+    );
+    publicMessage = await publicChannel.send(panel.buildSuggestionMessagePayload(guild, item, section, enabled, true));
+    item = suggestions.updateSuggestion(guild.id, suggestionId, {
+      channelId: publicMessage.channelId,
+      messageId: publicMessage.id,
+    }, guild) || item;
+  }
+
+  if (section.requireReview !== false) {
+    let reviewMessage = await fetchStoredMessage(guild, item.reviewChannelId, item.reviewMessageId);
+    if (!reviewMessage) {
+      if (!section.reviewChannelId) throw new Error('Set the private team discussion channel before repairing the management message.');
+      const reviewChannel = await tracking.resolveSendableChannel(
+        guild,
+        section.reviewChannelId,
+        'team discussion channel',
+        { requireHistory: true },
+      );
+      reviewMessage = await reviewChannel.send(panel.buildManagementPayload(guild, item, section));
+      item = suggestions.updateSuggestion(guild.id, suggestionId, {
+        reviewChannelId: reviewMessage.channelId,
+        reviewMessageId: reviewMessage.id,
+      }, guild) || item;
+    }
+  }
+
+  await tracking.refreshSuggestionMessage(guild, suggestionId, panel).catch(() => null);
+  await tracking.refreshReviewMessage(guild, suggestionId, panel).catch(() => null);
+  return suggestions.getSuggestion(guild.id, suggestionId) || item;
+}
+
+async function deleteLinkedMessages(guild, item) {
+  const targets = [
+    [item.channelId, item.messageId],
+    [item.reviewChannelId, item.reviewMessageId],
+  ];
+  let deleted = 0;
+  for (const [channelId, messageId] of targets) {
+    const message = await fetchStoredMessage(guild, channelId, messageId);
+    if (message?.deletable) {
+      await message.delete().catch(() => null);
+      deleted += 1;
+    }
+  }
+  return deleted;
+}
+
+async function reconcileAdminState(guild) {
+  await reconcilePublishedPanel(guild).catch(() => false);
+}
+
 function buildAdminPanel(guild, memberName, page = 'overview', rolePage = 0) {
   if (page === 'settings') return buildSettingsPanel(guild, memberName);
   if (page === 'reviewers') return buildManagementTeamPanel(guild, memberName, rolePage);
@@ -365,6 +628,7 @@ async function handleSuggestionsAdminInteraction(interaction) {
     }
 
     if (id === 'admin:suggestions' || id === 'admin:suggestions:overview') {
+      await reconcileAdminState(interaction.guild);
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'overview'));
     }
     if (id === 'admin:suggestions:settings') {
@@ -376,6 +640,89 @@ async function handleSuggestionsAdminInteraction(interaction) {
     }
     if (id === 'admin:suggestions:destinations') {
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'destinations'));
+    }
+
+    const recordParts = id.split(':');
+    if (recordParts[2] === 'records' && recordParts[3] === 'page') {
+      return safeUpdate(interaction, buildSuggestionRecordsPanel(interaction.guild, memberName, Number(recordParts[4] || 0)));
+    }
+    if (interaction.isStringSelectMenu?.() && recordParts[2] === 'records' && recordParts[3] === 'select') {
+      const page = Number(recordParts[4] || 0);
+      const suggestionId = suggestions.cleanSuggestionId(interaction.values?.[0]);
+      if (!suggestionId) throw new Error('That stored suggestion could not be found.');
+      return safeUpdate(interaction, await buildSuggestionRecordDetail(interaction.guild, memberName, suggestionId, page));
+    }
+    if (recordParts[2] === 'record') {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      return safeUpdate(interaction, await buildSuggestionRecordDetail(interaction.guild, memberName, suggestionId, page));
+    }
+    if (recordParts[2] === 'recordEdit' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      const item = suggestions.getSuggestion(interaction.guild.id, suggestionId);
+      if (!item) throw new Error('That stored suggestion could not be found.');
+      await interaction.showModal(buildRecordEditModal(item, page));
+      return true;
+    }
+    if (recordParts[2] === 'recordEditModal' && interaction.isModalSubmit?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      const title = String(interaction.fields.getTextInputValue('title') || '').trim();
+      const content = String(interaction.fields.getTextInputValue('content') || '').trim();
+      if (title.length < 3 || title.length > 100) throw new Error('The suggestion name must be between 3 and 100 characters.');
+      if (content.length < 5 || content.length > 1800) throw new Error('The suggestion details must be between 5 and 1800 characters.');
+      await interaction.deferUpdate();
+      const updated = suggestions.updateSuggestion(interaction.guild.id, suggestionId, (item) => ({
+        ...item,
+        title,
+        content,
+        history: suggestions.appendHistory(item.history, {
+          type: 'admin_edited',
+          actorId: interaction.user.id,
+          at: suggestions.now(),
+          fromStatus: item.status,
+          toStatus: item.status,
+          note: 'Suggestion text edited by management.',
+        }),
+      }), interaction.guild);
+      if (!updated) throw new Error('That stored suggestion could not be updated.');
+      await tracking.refreshSuggestionMessage(interaction.guild, suggestionId, panel).catch(() => null);
+      await tracking.refreshReviewMessage(interaction.guild, suggestionId, panel).catch(() => null);
+      return safeUpdate(interaction, await buildSuggestionRecordDetail(interaction.guild, memberName, suggestionId, page));
+    }
+    if (recordParts[2] === 'recordRefresh' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      await interaction.deferUpdate();
+      await repairSuggestionMessages(interaction.guild, suggestionId);
+      return safeUpdate(interaction, await buildSuggestionRecordDetail(interaction.guild, memberName, suggestionId, page));
+    }
+    if (recordParts[2] === 'recordDeleteMessages' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      return safeUpdate(interaction, buildDeleteConfirmation(interaction.guild, memberName, suggestionId, page, 'messages'));
+    }
+    if (recordParts[2] === 'recordDeleteMessagesConfirm' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      const item = suggestions.getSuggestion(interaction.guild.id, suggestionId);
+      if (!item) throw new Error('That stored suggestion could not be found.');
+      await interaction.deferUpdate();
+      await deleteLinkedMessages(interaction.guild, item);
+      return safeUpdate(interaction, await buildSuggestionRecordDetail(interaction.guild, memberName, suggestionId, page));
+    }
+    if (recordParts[2] === 'recordRemove' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      return safeUpdate(interaction, buildDeleteConfirmation(interaction.guild, memberName, suggestionId, page, 'record'));
+    }
+    if (recordParts[2] === 'recordRemoveConfirm' && interaction.isButton?.()) {
+      const suggestionId = suggestions.cleanSuggestionId(recordParts[3]);
+      const page = Number(recordParts[4] || 0);
+      await interaction.deferUpdate();
+      if (!removeStoredSuggestion(interaction.guild, suggestionId)) throw new Error('That stored suggestion could not be found.');
+      return safeUpdate(interaction, buildSuggestionRecordsPanel(interaction.guild, memberName, page));
     }
 
     if (interaction.isChannelSelectMenu?.()) {
