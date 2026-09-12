@@ -44,12 +44,22 @@ async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestion
 }
 
 async function refreshManagementRoleCache(guild) {
-  if (!guild?.roles?.fetch) throw new Error('The server role list could not be loaded.');
+  if (!guild?.roles?.fetch || !guild?.roles?.cache) throw new Error('The server role list could not be loaded.');
+  let fetched;
   try {
-    await guild.roles.fetch();
+    fetched = await guild.roles.fetch();
   } catch (error) {
     throw new Error(`The complete server role list could not be loaded: ${error.message || 'Please try again.'}`);
   }
+
+  if (!fetched?.size) throw new Error('Discord returned an empty server role list.');
+  for (const [roleId, role] of fetched.entries()) guild.roles.cache.set(roleId, role);
+
+  if (guild.roles.cache.size < fetched.size) {
+    throw new Error(`Only ${guild.roles.cache.size} of ${fetched.size} server roles were loaded.`);
+  }
+
+  return fetched;
 }
 
 async function handleSuggestionsAdminInteraction(interaction) {
@@ -210,7 +220,6 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
-    // Legacy public management button support for messages created before the managed workflow update.
     if (interaction.isButton?.() && parts[1] === 'reviewOpen') {
       const suggestionId = suggestions.cleanSuggestionId(parts[2]);
       if (!suggestionId) throw new Error('That review option is no longer available.');
@@ -228,7 +237,6 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
-    // Legacy approve/deny controls remain valid for old management messages.
     if (interaction.isButton?.() && parts[1] === 'review') {
       if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
