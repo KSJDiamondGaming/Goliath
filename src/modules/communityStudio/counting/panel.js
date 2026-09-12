@@ -16,7 +16,7 @@ const counting = require('./counting');
 const { isModuleEnabled, setModuleEnabled } = require('../../../core/guild/guildManager');
 
 const PREFIX = 'admin:module:counting';
-const PANEL_COLOR = 0x5865f2;
+const PANEL_COLOR = 0x2f80ed;
 
 const row = (...components) => new ActionRowBuilder().addComponents(...components);
 const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuilder()
@@ -32,36 +32,61 @@ function formatOptional(value, emptyLabel) {
   return value === null || value === undefined || value === '' ? emptyLabel : String(value);
 }
 
+function formatTurnLimit(value) {
+  if (value === null || value === undefined || value === '') return 'Unlimited';
+  if (Number(value) === 1) return '1 number per person';
+  return `${value} consecutive numbers per person`;
+}
+
+function formatHintThreshold(value) {
+  if (value === null || value === undefined || value === '') return 'Never reveal';
+  return `${value} mistake${Number(value) === 1 ? '' : 's'}`;
+}
+
+function formatCleanup(value) {
+  if (value === null || value === undefined || value === '') return 'Keep replies';
+  return `Delete after ${value}s`;
+}
+
 function buildPanel(guild, memberDisplayName = 'Unknown User') {
   const section = counting.getSection(guild.id);
   const enabled = isModuleEnabled(guild.id, counting.MODULE_KEY);
   const next = counting.expectedNext(section);
-  const channel = section.channelId ? `<#${section.channelId}>` : '`Not set`';
-  const lastCounter = section.lastCounterId ? `<@${section.lastCounterId}>` : '`Nobody yet`';
+  const channel = section.channelId ? `<#${section.channelId}>` : null;
+  const lastCounter = section.lastCounterId ? `<@${section.lastCounterId}>` : 'Nobody yet';
+  const setupWarning = !section.channelId
+    ? '\n\n⚠️ **Choose a counting channel before members can play.**'
+    : '';
+
+  const gameValue = [
+    `**Current:** \`${section.currentCount}\``,
+    `**Next:** \`${next}\``,
+    `**Record:** \`${section.highestCount}\``,
+    `**Last Counter:** ${lastCounter}`,
+  ].join('\n');
+
+  const rulesValue = [
+    `**Start At:** \`${section.startingNumber}\``,
+    `**Turn Limit:** ${formatTurnLimit(section.maxConsecutivePerMember)}`,
+    `**Hint After:** ${formatHintThreshold(section.answerAfterFailures)}`,
+    `**Wrong Counts:** ${section.deleteIncorrect ? 'Deleted ✅' : 'Kept ❌'}`,
+    `**Goliath Banter:** ${section.funnyResponses ? 'On 😂' : 'Off'}`,
+    `**Bot Replies:** ${formatCleanup(section.responseCleanupSeconds)}`,
+    `**Milestones:** ${section.milestoneAnnouncements ? `Every ${section.milestoneInterval} 🎉` : 'Off'}`,
+  ].join('\n');
 
   const embed = new EmbedBuilder()
-    .setColor(enabled ? 0x57f287 : PANEL_COLOR)
+    .setColor(PANEL_COLOR)
     .setTitle('🔢 Counting')
     .setDescription([
-      'Keep one channel in numerical order while Goliath deals with the questionable maths.',
+      'Keep the numbers moving in order while Goliath deals with the questionable maths.',
       '',
-      `**Status:** ${enabled ? 'Enabled ✅' : 'Disabled ❌'}`,
-      `**Counting Channel:** ${channel}`,
-      '',
-      `**Current Count:** \`${section.currentCount}\``,
-      `**Next Number:** \`${next}\``,
-      `**Highest Count:** \`${section.highestCount}\``,
-      `**Last Counter:** ${lastCounter}`,
-      `**Failed Attempts:** \`${section.failureStreak}\``,
-      '',
-      `**Starting Number:** \`${section.startingNumber}\``,
-      `**Maximum Consecutive Counts:** \`${formatOptional(section.maxConsecutivePerMember, 'Unlimited')}\``,
-      `**Reveal Answer After:** \`${formatOptional(section.answerAfterFailures, 'Disabled')}\` failed attempt(s)`,
-      `**Delete Incorrect Messages:** ${section.deleteIncorrect ? 'Yes ✅' : 'No ❌'}`,
-      `**Funny Responses:** ${section.funnyResponses ? 'On ✅' : 'Off ❌'}`,
-      `**Response Cleanup:** \`${formatOptional(section.responseCleanupSeconds, 'Never')}\`${section.responseCleanupSeconds === null ? '' : ' seconds'}`,
-      `**Milestones:** ${section.milestoneAnnouncements ? `On ✅ · every ${section.milestoneInterval}` : 'Off ❌'}`,
+      `**${enabled ? '🟢 Active' : '⚪ Disabled'}**${channel ? ` in ${channel}` : ''}${setupWarning}`,
     ].join('\n'))
+    .addFields(
+      { name: '📊 Current Game', value: gameValue, inline: false },
+      { name: '⚙️ Rules', value: rulesValue, inline: false },
+    )
     .setFooter({ text: `Requested by ${memberDisplayName}` })
     .setTimestamp();
 
@@ -71,22 +96,24 @@ function buildPanel(guild, memberDisplayName = 'Unknown User') {
     components: [
       row(new ChannelSelectMenuBuilder()
         .setCustomId(`${PREFIX}:channel`)
-        .setPlaceholder('Choose the counting channel')
+        .setPlaceholder(section.channelId ? 'Change the counting channel' : 'Choose the counting channel')
         .setChannelTypes(ChannelType.GuildText)
         .setMinValues(0)
         .setMaxValues(1)),
       row(
         button(`${PREFIX}:toggle:enabled`, enabled ? '⏸️ Disable' : '▶️ Enable', enabled ? ButtonStyle.Secondary : ButtonStyle.Success),
-        button(`${PREFIX}:toggle:delete`, section.deleteIncorrect ? '🗑️ Delete: On' : '🗑️ Delete: Off', ButtonStyle.Secondary),
-        button(`${PREFIX}:toggle:funny`, section.funnyResponses ? '😂 Jokes: On' : '😂 Jokes: Off', ButtonStyle.Secondary),
+        button(`${PREFIX}:rules`, '⚙️ Rules', ButtonStyle.Primary),
+        button(`${PREFIX}:setCurrent`, '🎯 Set Count', ButtonStyle.Secondary),
+      ),
+      row(
+        button(`${PREFIX}:toggle:delete`, section.deleteIncorrect ? '🗑️ Wrong Counts: Delete' : '🗑️ Wrong Counts: Keep', ButtonStyle.Secondary),
+        button(`${PREFIX}:toggle:funny`, section.funnyResponses ? '😂 Banter: On' : '😂 Banter: Off', ButtonStyle.Secondary),
         button(`${PREFIX}:toggle:milestones`, section.milestoneAnnouncements ? '🎉 Milestones: On' : '🎉 Milestones: Off', ButtonStyle.Secondary),
       ),
       row(
-        button(`${PREFIX}:rules`, '⚙️ Rules & Timing', ButtonStyle.Primary),
-        button(`${PREFIX}:setCurrent`, '🎯 Set Current Count', ButtonStyle.Secondary),
-        button(`${PREFIX}:reset`, '♻️ Reset Progress', ButtonStyle.Danger),
+        button(`${PREFIX}:reset`, '♻️ Reset', ButtonStyle.Danger),
+        button('admin:studio:communityStudio', '⬅️ Back', ButtonStyle.Secondary),
       ),
-      row(button('admin:studio:communityStudio', '⬅️ Back', ButtonStyle.Secondary)),
     ],
   };
 }
@@ -106,12 +133,12 @@ function buildRulesModal(guildId) {
   const section = counting.getSection(guildId);
   return new ModalBuilder()
     .setCustomId(`${PREFIX}:rules:save`)
-    .setTitle('Counting Rules & Timing')
+    .setTitle('Counting Rules')
     .addComponents(
       row(textInput('startingNumber', 'Starting number', section.startingNumber, { required: true, placeholder: '1' })),
-      row(textInput('maxConsecutive', 'Maximum consecutive counts', section.maxConsecutivePerMember, { placeholder: 'Blank = unlimited' })),
-      row(textInput('answerAfter', 'Reveal answer after failed attempts', section.answerAfterFailures, { placeholder: 'Blank = never reveal' })),
-      row(textInput('cleanupSeconds', 'Delete bot responses after seconds', section.responseCleanupSeconds, { placeholder: 'Blank = keep responses' })),
+      row(textInput('maxConsecutive', 'Consecutive counts per member', section.maxConsecutivePerMember, { placeholder: 'Blank = unlimited' })),
+      row(textInput('answerAfter', 'Give hint after mistakes', section.answerAfterFailures, { placeholder: 'Blank = never reveal' })),
+      row(textInput('cleanupSeconds', 'Delete bot replies after seconds', section.responseCleanupSeconds, { placeholder: 'Blank = keep replies' })),
       row(textInput('milestoneInterval', 'Milestone interval', section.milestoneInterval, { required: true, placeholder: '100' })),
     );
 }
@@ -128,11 +155,11 @@ function buildSetCurrentModal(guildId) {
 
 function buildResetConfirmation() {
   return {
-    content: '⚠️ Reset counting progress? This clears the current/highest count, last counter, failed attempts and member counting stats. Your rules and channel stay unchanged.',
+    content: '⚠️ Reset counting progress? This clears the current count, record, last counter, failed attempts and member counting stats. Your channel and rules stay unchanged.',
     embeds: [],
     components: [
       row(
-        button(`${PREFIX}:reset:confirm`, 'Yes, Reset Progress', ButtonStyle.Danger),
+        button(`${PREFIX}:reset:confirm`, 'Yes, Reset', ButtonStyle.Danger),
         button(`${PREFIX}:main:0`, 'Cancel', ButtonStyle.Secondary),
       ),
     ],
@@ -213,9 +240,9 @@ async function handleInteraction(interaction) {
     if (interaction.isModalSubmit?.() && id === `${PREFIX}:rules:save`) {
       const old = counting.getSection(interaction.guild.id);
       const startingNumber = parseRequiredInteger(interaction, 'startingNumber', 'Starting number', 0);
-      const maxConsecutivePerMember = parseOptionalPositiveInteger(interaction, 'maxConsecutive', 'Maximum consecutive counts');
-      const answerAfterFailures = parseOptionalPositiveInteger(interaction, 'answerAfter', 'Reveal-answer threshold');
-      const responseCleanupSeconds = parseOptionalPositiveInteger(interaction, 'cleanupSeconds', 'Response cleanup time');
+      const maxConsecutivePerMember = parseOptionalPositiveInteger(interaction, 'maxConsecutive', 'Consecutive-count limit');
+      const answerAfterFailures = parseOptionalPositiveInteger(interaction, 'answerAfter', 'Hint threshold');
+      const responseCleanupSeconds = parseOptionalPositiveInteger(interaction, 'cleanupSeconds', 'Reply cleanup time');
       const milestoneInterval = parseRequiredInteger(interaction, 'milestoneInterval', 'Milestone interval', 1);
       const hasProgress = old.currentCount >= old.startingNumber
         || Object.values(old.memberStats || {}).some((stats) => Number(stats?.validCounts || 0) > 0);
