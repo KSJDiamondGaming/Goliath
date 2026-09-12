@@ -40,13 +40,14 @@ function defaultSegment(type = 'members') {
   return { type, options: {} };
 }
 function newDraft(settings = {}) {
-  return { name: 'Members', template: '👥 Members: {value}', frequencyMinutes: Number(settings.defaultFrequencyMinutes || 10), segments: [defaultSegment('members')] };
+  return { name: 'Members', channelType: 'voice', template: '👥 Members: {value}', frequencyMinutes: Number(settings.defaultFrequencyMinutes || 10), segments: [defaultSegment('members')] };
 }
 function normalizeDraft(counter, settings = {}) {
   if (!counter) return newDraft(settings);
   return {
     id: counter.id,
     name: counter.name || 'Counter',
+    channelType: counter.channelType === 'text' ? 'text' : 'voice',
     template: counter.template || '{value}',
     frequencyMinutes: Number(counter.frequencyMinutes || settings.defaultFrequencyMinutes || 10),
     segments: Array.isArray(counter.segments) && counter.segments.length ? counter.segments.map((segment) => ({ ...segment, options: { ...(segment.options || {}) } })) : [defaultSegment('members')],
@@ -208,7 +209,7 @@ export default function Stats({ theme, selectedGuild, selectedGuildData }) {
         <SummaryStat theme={theme} label="In Voice" value={live.members?.inVoice ?? '—'} accent="#c084fc" description="Members currently in voice" />
         <SummaryStat theme={theme} label="Counters" value={activeCounters} accent="#f59e0b" description={`${counters.length} saved`} />
       </StatGrid>
-      <SectionCard theme={theme} title="Server Counter Setup" subtitle="Live read-only voice channels that display your server numbers at a glance.">
+      <SectionCard theme={theme} title="Server Counter Setup" subtitle="Live read-only text or voice channels that display your server numbers at a glance.">
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><PrimaryButton onClick={quickSetup} disabled={busy}>⚡ Quick Setup</PrimaryButton><SecondaryButton onClick={refreshCounters} disabled={busy}>🔄 Refresh Now</SecondaryButton><SecondaryButton onClick={() => setDraft(newDraft(config?.settings))} disabled={busy}>➕ Create Counter</SecondaryButton></div>
       </SectionCard>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,300px),1fr))', gap: 16 }}>
@@ -220,17 +221,18 @@ export default function Stats({ theme, selectedGuild, selectedGuildData }) {
 
   const countersContent = (
     <div style={{ display: 'grid', gap: 16 }}>
-      <SectionCard theme={theme} title="Your Counters" subtitle="Turn counters on or off, edit them, or combine up to four values in one channel name.">
+      <SectionCard theme={theme} title="Your Counters" subtitle="Turn counters on or off, edit them, choose text or voice output, or combine up to four values in one channel name.">
         {counters.length ? <div style={{ display: 'grid', gap: 10 }}>{counters.map((counter) => <div key={counter.id} style={{ border: `1px solid ${theme.cardBorder}`, borderRadius: 12, padding: 14, display: 'grid', gap: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}><div><strong>{counter.enabled ? '🟢' : '⚫'} {counter.name || 'Counter'}</strong><div style={{ color: theme.mutedText, marginTop: 4 }}>{counter.segments?.map((segment) => TYPE_LABEL[segment.type] || segment.type).join(' + ')}</div></div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><SecondaryButton onClick={() => setDraft(normalizeDraft(counter, config?.settings))}>Edit</SecondaryButton><SecondaryButton onClick={() => toggleCounter(counter)} disabled={busy}>{counter.enabled ? 'Turn Off' : 'Turn On'}</SecondaryButton><SecondaryButton danger onClick={() => deleteCounter(counter)} disabled={busy}>Delete</SecondaryButton></div></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}><div><strong>{counter.enabled ? '🟢' : '⚫'} {counter.channelType === 'text' ? '#️⃣' : '🔊'} {counter.name || 'Counter'}</strong><div style={{ color: theme.mutedText, marginTop: 4 }}>{counter.segments?.map((segment) => TYPE_LABEL[segment.type] || segment.type).join(' + ')}</div></div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><SecondaryButton onClick={() => setDraft(normalizeDraft(counter, config?.settings))}>Edit</SecondaryButton><SecondaryButton onClick={() => toggleCounter(counter)} disabled={busy}>{counter.enabled ? 'Turn Off' : 'Turn On'}</SecondaryButton><SecondaryButton danger onClick={() => deleteCounter(counter)} disabled={busy}>Delete</SecondaryButton></div></div>
           <div style={{ borderRadius: 9, padding: '9px 11px', background: 'rgba(148,163,184,0.10)', fontWeight: 800 }}>{counter.template}</div>
         </div>)}</div> : <div style={{ color: theme.mutedText }}>No counters yet. Use Quick Setup or create your first one.</div>}
       </SectionCard>
 
-      {draft ? <SectionCard theme={theme} title={draft.id ? `Edit ${draft.name}` : 'Create Counter'} subtitle="Build the channel text, then choose up to four values to insert into it.">
+      {draft ? <SectionCard theme={theme} title={draft.id ? `Edit ${draft.name}` : 'Create Counter'} subtitle="Choose text or voice output, build the channel text, then insert up to four live values.">
         <div style={{ display: 'grid', gap: 14 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12 }}>
             <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>Counter name<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} style={control(theme)} /></label>
+            <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>Channel type<select value={draft.channelType || 'voice'} onChange={(event) => setDraft({ ...draft, channelType: event.target.value })} style={control(theme)}><option value="voice">🔊 Voice Channel</option><option value="text">#️⃣ Text Channel</option></select></label>
             <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>Update frequency<select value={draft.frequencyMinutes} onChange={(event) => setDraft({ ...draft, frequencyMinutes: Number(event.target.value) })} style={control(theme)}><option value="10">Every 10 minutes</option><option value="15">Every 15 minutes</option><option value="30">Every 30 minutes</option><option value="60">Every hour</option><option value="360">Every 6 hours</option><option value="1440">Daily</option></select></label>
           </div>
           <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>Channel text<input value={draft.template} onChange={(event) => setDraft({ ...draft, template: event.target.value })} maxLength={100} style={control(theme)} /><span style={{ color: theme.mutedText, fontWeight: 600 }}>Use <code>{'{value}'}</code> for one counter. With multiple counters use <code>{'{1}'}</code>, <code>{'{2}'}</code>, <code>{'{3}'}</code>, <code>{'{4}'}</code>.</span></label>
