@@ -43,6 +43,15 @@ async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestion
   });
 }
 
+async function refreshManagementRoleCache(guild) {
+  if (!guild?.roles?.fetch) throw new Error('The server role list could not be loaded.');
+  try {
+    await guild.roles.fetch();
+  } catch (error) {
+    throw new Error(`The complete server role list could not be loaded: ${error.message || 'Please try again.'}`);
+  }
+}
+
 async function handleSuggestionsAdminInteraction(interaction) {
   const id = String(interaction?.customId || '');
   if (!id.startsWith('admin:suggestions')) return false;
@@ -57,6 +66,8 @@ async function handleSuggestionsAdminInteraction(interaction) {
   try {
     const rolePicker = panelNavigation.parseRolePickerId(id);
     if (rolePicker?.baseId === 'admin:suggestions:reviewerRoles') {
+      await refreshManagementRoleCache(interaction.guild);
+
       if (rolePicker.kind === 'select' && interaction.isStringSelectMenu?.()) {
         const section = suggestions.getSection(interaction.guild.id);
         const reviewerRoleIds = panelNavigation.mergeRolePickerSelection(
@@ -77,6 +88,7 @@ async function handleSuggestionsAdminInteraction(interaction) {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
     }
     if (id === 'admin:suggestions:reviewers') {
+      await refreshManagementRoleCache(interaction.guild);
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'reviewers'));
     }
     if (id === 'admin:suggestions:destinations') {
