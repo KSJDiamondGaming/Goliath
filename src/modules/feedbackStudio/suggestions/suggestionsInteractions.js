@@ -18,8 +18,10 @@ const { setModuleEnabled, isModuleEnabled } = require('../../../core/guild/guild
 const SUGGESTIONS_COLOR = panel.SUGGESTIONS_COLOR || 0xfee75c;
 const row = (...components) => new ActionRowBuilder().addComponents(...components);
 const button = (customId, label, style = ButtonStyle.Primary) => new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style);
-const formatChannel = (id) => id ? `<#${id}>` : '*Not set*';
-const formatRoles = (ids = []) => Array.isArray(ids) && ids.filter(Boolean).length ? ids.filter(Boolean).map((id) => `<@&${id}>`).join(', ') : '*None selected*';
+const formatChannel = (id) => id ? `<#${id}>` : '⚠️ Not set';
+const formatRoles = (ids = []) => Array.isArray(ids) && ids.filter(Boolean).length
+  ? ids.filter(Boolean).map((id) => `<@&${id}>`).join(', ')
+  : 'Administrators / Manage Server only';
 
 async function safeReply(interaction, content) {
   const text = String(content || 'That suggestion action could not be completed.').slice(0, 1900);
@@ -66,39 +68,98 @@ async function refreshManagementRoleCache(guild) {
   }
 }
 
+function workflowReadiness(section, enabled) {
+  const reviewEnabled = section.requireReview !== false;
+  const missing = [];
+  if (!section.submitChannelId) missing.push('public suggestions channel');
+  if (reviewEnabled && !section.reviewChannelId) missing.push('private team discussion channel');
+  return {
+    ready: enabled && missing.length === 0,
+    missing,
+    reviewEnabled,
+  };
+}
+
 function buildOverviewPanel(guild, memberName) {
   const section = suggestions.getSection(guild.id);
   const enabled = isModuleEnabled(guild.id, 'suggestions');
+  const readiness = workflowReadiness(section, enabled);
+  const deployed = Boolean(section.deployment?.channelId && section.deployment?.messageId);
+  const outcomesConfigured = [section.approvedChannelId, section.deniedChannelId].filter(Boolean).length;
+  const managementRoles = Array.isArray(section.reviewerRoleIds) ? section.reviewerRoleIds.filter(Boolean) : [];
+
+  const nextStep = !enabled
+    ? '⚠️ Suggestions are disabled. Open **Settings** to enable the module.'
+    : readiness.missing.length
+      ? `⚠️ Complete the ${readiness.missing.join(' and ')} before publishing.`
+      : deployed
+        ? '✅ Core setup is complete. Use **Update Public Panel** after configuration changes.'
+        : '✅ Core setup is complete. You can publish the member-facing panel.';
+
   const embed = new EmbedBuilder()
     .setColor(SUGGESTIONS_COLOR)
-    .setTitle('💡 Suggestions')
-    .setDescription([
-      'Set up where suggestions go and who manages them. Use **Settings** for module-wide behaviour.', '',
-      `**Status:** ${enabled ? '🟢 Enabled' : '🔴 Disabled'}`, '',
-      '**Channels**',
-      `• Public suggestions: ${formatChannel(section.submitChannelId)}`,
-      `• Team discussion: ${formatChannel(section.reviewChannelId)}`,
-      `• Audit log: ${formatChannel(section.logChannelId)}`, '',
-      '**Management team**',
-      `• ${formatRoles(section.reviewerRoleIds)}`, '',
-      '**Activity**',
-      `• ${section.analytics.submitted} submitted · ${section.analytics.discussing} discussing · ${section.analytics.approved} approved`,
-      `• ${section.analytics.implemented} implemented · ${section.analytics.denied} declined`,
-    ].join('\n'))
-    .setFooter({ text: `Opened by ${memberName}` })
+    .setTitle('💡 Suggestions · Control Centre')
+    .setDescription('Set up and manage the suggestion workflow from one place. The important day-to-day controls stay here; global behaviour lives under **Settings**.')
+    .addFields(
+      {
+        name: 'Current status',
+        value: [
+          `• Module: ${enabled ? '🟢 Enabled' : '🔴 Disabled'}`,
+          `• Public panel: ${deployed ? `✅ Published in ${formatChannel(section.deployment.channelId)}` : '⚪ Not published yet'}`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: 'Core setup',
+        value: [
+          `1️⃣ Public suggestions: ${formatChannel(section.submitChannelId)}`,
+          `2️⃣ Team discussion: ${readiness.reviewEnabled ? formatChannel(section.reviewChannelId) : '⏸️ Not used while review is disabled'}`,
+          `3️⃣ Management team: ${managementRoles.length ? formatRoles(managementRoles) : 'Administrators / Manage Server only'}`,
+          `4️⃣ Outcomes: ${outcomesConfigured}/2 channels set · Audit log: ${section.logChannelId ? '✅ Set' : '⚠️ Not set'}`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: 'Suggestion activity',
+        value: [
+          `💡 Submitted **${section.analytics.submitted}**   ·   💬 Discussing **${section.analytics.discussing}**`,
+          `✅ Approved **${section.analytics.approved}**   ·   🚀 Implemented **${section.analytics.implemented}**   ·   ❌ Declined **${section.analytics.denied}**`,
+        ].join('\n'),
+        inline: false,
+      },
+      { name: 'Next step', value: nextStep, inline: false },
+    )
+    .setFooter({ text: `Suggestions management · Opened by ${memberName}` })
     .setTimestamp();
+
+  const publishButton = button(
+    'admin:suggestions:deploy',
+    deployed ? '🔄 Update Public Panel' : '🚀 Publish Public Panel',
+    ButtonStyle.Success,
+  ).setDisabled(!readiness.ready);
 
   return {
     embeds: [embed],
     components: [
-      row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:submitChannel').setPlaceholder('Public suggestions channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
-      row(new ChannelSelectMenuBuilder().setCustomId('admin:suggestions:reviewChannel').setPlaceholder('Private team discussion channel').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(0).setMaxValues(1)),
+      row(new ChannelSelectMenuBuilder()
+        .setCustomId('admin:suggestions:submitChannel')
+        .setPlaceholder('1 · Choose public suggestions channel')
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMinValues(0)
+        .setMaxValues(1)),
+      row(new ChannelSelectMenuBuilder()
+        .setCustomId('admin:suggestions:reviewChannel')
+        .setPlaceholder(readiness.reviewEnabled ? '2 · Choose private team discussion channel' : '2 · Team discussion is currently disabled')
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMinValues(0)
+        .setMaxValues(1)
+        .setDisabled(!readiness.reviewEnabled)),
       row(
         button('admin:suggestions:reviewers', '👥 Management Team', ButtonStyle.Primary),
         button('admin:suggestions:destinations', '📬 Outcomes & Logs', ButtonStyle.Primary),
         button('admin:suggestions:settings', '⚙️ Settings', ButtonStyle.Secondary),
       ),
-      row(button('admin:suggestions:deploy', '🚀 Publish Panel', ButtonStyle.Success)),
+      row(publishButton),
       row(button('admin:modules', '⬅️ Back to Modules', ButtonStyle.Secondary)),
     ],
   };
@@ -114,38 +175,161 @@ function buildSettingsPanel(guild, memberName) {
   const embed = new EmbedBuilder()
     .setColor(SUGGESTIONS_COLOR)
     .setTitle('💡 Suggestions · Settings')
-    .setDescription([
-      'Control how the Suggestions module behaves across the server.', '',
-      '**Module**',
-      `• Suggestions: ${enabled ? '✅ Enabled' : '❌ Disabled'}`, '',
-      '**Community**',
-      `• Community voting: ${voting ? '✅ Enabled' : '❌ Disabled'}`,
-      `• Public identity: ${anonymous ? '🔒 Anonymous' : '👤 Named'}`, '',
-      '**Management workflow**',
-      `• Management review: ${review ? '✅ Enabled' : '❌ Disabled'}`, '',
-      '*These are global settings. Changes apply to the Suggestions module across this server.*',
-    ].join('\n'))
-    .setFooter({ text: `Opened by ${memberName}` })
+    .setDescription('These settings control how Suggestions behaves across the whole server. The buttons below describe the action they will perform.')
+    .addFields(
+      {
+        name: 'Module',
+        value: `Suggestions are currently **${enabled ? 'Enabled ✅' : 'Disabled ❌'}**.\n${enabled ? 'Members can use the published panel and active suggestion controls.' : 'New submissions and active controls are paused.'}`,
+        inline: false,
+      },
+      {
+        name: 'Community voting',
+        value: voting ? '✅ Enabled · Open suggestions can receive community votes.' : '❌ Disabled · Vote controls are hidden globally.',
+        inline: true,
+      },
+      {
+        name: 'Management review',
+        value: review ? '✅ Enabled · Suggestions use the managed review workflow.' : '❌ Disabled · Private review workflow is bypassed.',
+        inline: true,
+      },
+      {
+        name: 'Public identity',
+        value: anonymous
+          ? '🔒 Anonymous · Public suggestion cards hide the member name. Management can still identify the submitter.'
+          : '👤 Named · Public suggestion cards show the submitting member.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `Global Suggestions settings · Opened by ${memberName}` })
     .setTimestamp();
 
   return {
     embeds: [embed],
     components: [
-      row(button(enabled ? 'admin:suggestions:disable' : 'admin:suggestions:enable', enabled ? '⏸️ Disable Suggestions' : '▶️ Enable Suggestions', enabled ? ButtonStyle.Danger : ButtonStyle.Success)),
+      row(button(
+        enabled ? 'admin:suggestions:disable' : 'admin:suggestions:enable',
+        enabled ? '⏸️ Disable Suggestions' : '▶️ Enable Suggestions',
+        enabled ? ButtonStyle.Danger : ButtonStyle.Success,
+      )),
       row(
         button('admin:suggestions:toggleVoting', voting ? '⏸️ Disable Voting' : '▶️ Enable Voting', voting ? ButtonStyle.Secondary : ButtonStyle.Success),
         button('admin:suggestions:toggleReview', review ? '⏸️ Disable Review' : '▶️ Enable Review', review ? ButtonStyle.Secondary : ButtonStyle.Success),
       ),
-      row(button('admin:suggestions:toggleAnonymous', anonymous ? '👤 Show Member Names' : '🔒 Make Suggestions Anonymous', ButtonStyle.Secondary)),
-      row(button('admin:suggestions:overview', '⬅️ Back to Suggestions', ButtonStyle.Secondary)),
+      row(button(
+        'admin:suggestions:toggleAnonymous',
+        anonymous ? '👤 Show Member Names Publicly' : '🔒 Make Public Suggestions Anonymous',
+        ButtonStyle.Secondary,
+      )),
+      row(button('admin:suggestions:overview', '⬅️ Back to Control Centre', ButtonStyle.Secondary)),
     ],
   };
 }
 
-function buildAdminPanel(guild, memberName, page = 'overview') {
-  if (page === 'overview') return buildOverviewPanel(guild, memberName);
+function buildManagementTeamPanel(guild, memberName, page = 0) {
+  const section = suggestions.getSection(guild.id);
+  const pageCount = panelNavigation.rolePickerPageCount(guild);
+  const safePage = Math.min(Math.max(0, Number(page) || 0), pageCount - 1);
+  const picker = panelNavigation.buildRolePicker(guild, {
+    customId: 'admin:suggestions:reviewerRoles',
+    placeholder: 'Choose management roles',
+    selectedIds: section.reviewerRoleIds,
+    minValues: 0,
+    maxValues: 25,
+    page: safePage,
+    pagination: true,
+    showManaged: true,
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions · Management Team')
+    .setDescription('Choose the roles that can move suggestions through discussion, approval, decline and implementation.')
+    .addFields(
+      {
+        name: 'Selected management roles',
+        value: formatRoles(section.reviewerRoleIds),
+        inline: false,
+      },
+      {
+        name: 'Role list',
+        value: `Roles are ordered **highest → lowest** in the server hierarchy. Page **${safePage + 1} of ${pageCount}**.${pageCount > 1 ? ' Use Previous / Next to view every role.' : ''}`,
+        inline: false,
+      },
+      {
+        name: 'Built-in access',
+        value: 'Members with **Administrator** or **Manage Server** can always manage suggestions, even if no role is selected here.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `Management access · Opened by ${memberName}` })
+    .setTimestamp();
+
+  return {
+    embeds: [embed],
+    components: [
+      ...picker.rows,
+      row(button('admin:suggestions:overview', '⬅️ Back to Control Centre', ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function buildDestinationsPanel(guild, memberName) {
+  const section = suggestions.getSection(guild.id);
+  const embed = new EmbedBuilder()
+    .setColor(SUGGESTIONS_COLOR)
+    .setTitle('💡 Suggestions · Outcomes & Logs')
+    .setDescription('Choose where final results and the management audit trail are posted. The original public suggestion is always updated with its final status and team response.')
+    .addFields(
+      {
+        name: '✅ Approved suggestions',
+        value: section.approvedChannelId ? formatChannel(section.approvedChannelId) : 'Optional · no separate approved-results channel selected',
+        inline: false,
+      },
+      {
+        name: '❌ Declined suggestions',
+        value: section.deniedChannelId ? formatChannel(section.deniedChannelId) : 'Optional · no separate declined-results channel selected',
+        inline: false,
+      },
+      {
+        name: '🧾 Audit log',
+        value: section.logChannelId ? `${formatChannel(section.logChannelId)} · Management actions are recorded here.` : '⚠️ Not set · recommended so management actions have a permanent channel record.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `Outcome routing · Opened by ${memberName}` })
+    .setTimestamp();
+
+  return {
+    embeds: [embed],
+    components: [
+      row(new ChannelSelectMenuBuilder()
+        .setCustomId('admin:suggestions:approvedChannel')
+        .setPlaceholder('Approved suggestions channel · optional')
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMinValues(0)
+        .setMaxValues(1)),
+      row(new ChannelSelectMenuBuilder()
+        .setCustomId('admin:suggestions:deniedChannel')
+        .setPlaceholder('Declined suggestions channel · optional')
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMinValues(0)
+        .setMaxValues(1)),
+      row(new ChannelSelectMenuBuilder()
+        .setCustomId('admin:suggestions:logChannel')
+        .setPlaceholder('Suggestions audit log channel · recommended')
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMinValues(0)
+        .setMaxValues(1)),
+      row(button('admin:suggestions:overview', '⬅️ Back to Control Centre', ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function buildAdminPanel(guild, memberName, page = 'overview', rolePage = 0) {
   if (page === 'settings') return buildSettingsPanel(guild, memberName);
-  return panel.buildSuggestionsAdminPanel(guild, memberName, page);
+  if (page === 'reviewers') return buildManagementTeamPanel(guild, memberName, rolePage);
+  if (page === 'destinations') return buildDestinationsPanel(guild, memberName);
+  return buildOverviewPanel(guild, memberName);
 }
 
 async function handleSuggestionsAdminInteraction(interaction) {
@@ -173,10 +357,10 @@ async function handleSuggestionsAdminInteraction(interaction) {
           rolePicker.page,
         );
         save((current) => ({ ...current, reviewerRoleIds }));
-        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+        return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'reviewers', rolePicker.page));
       }
       if (rolePicker.kind === 'page' && interaction.isButton?.()) {
-        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+        return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'reviewers', rolePicker.page));
       }
     }
 
@@ -214,17 +398,17 @@ async function handleSuggestionsAdminInteraction(interaction) {
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleVoting') {
       await interaction.deferUpdate();
-      save((section) => ({ ...section, voting: !section.voting }));
+      save((section) => ({ ...section, voting: section.voting === false }));
       await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleReview') {
       await interaction.deferUpdate();
-      save((section) => ({ ...section, requireReview: !section.requireReview }));
+      save((section) => ({ ...section, requireReview: section.requireReview === false }));
       await refreshLiveSuggestionUi(interaction.guild, { suggestionMessages: true });
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:toggleAnonymous') {
       await interaction.deferUpdate();
-      save((section) => ({ ...section, anonymous: !section.anonymous }));
+      save((section) => ({ ...section, anonymous: section.anonymous !== true }));
       await refreshLiveSuggestionUi(interaction.guild, { panelMessage: true });
       return safeUpdate(interaction, buildAdminPanel(interaction.guild, memberName, 'settings'));
     } else if (id === 'admin:suggestions:deploy') {
@@ -277,8 +461,8 @@ async function handleSuggestionsInteraction(interaction) {
       const saved = await tracking.submitSuggestion(interaction, panel);
       await interaction.editReply({
         content: saved.anonymous === true
-          ? `✅ **${saved.title}** has been shared anonymously and sent to the management workflow.`
-          : `✅ **${saved.title}** has been shared and sent to the management workflow.`,
+          ? `✅ **${saved.title}** was shared anonymously. You can follow its progress from **My Suggestions**.`
+          : `✅ **${saved.title}** was shared. You can follow its progress from **My Suggestions**.`,
       });
       return true;
     }
