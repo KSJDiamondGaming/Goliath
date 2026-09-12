@@ -4,6 +4,7 @@ const { MessageFlags } = require('discord.js');
 const suggestions = require('./suggestions');
 const panel = require('./suggestionsPanel');
 const tracking = require('./suggestionsTracking');
+const panelNavigation = require('../../../core/ui/panelNavigation');
 const { setModuleEnabled } = require('../../../core/guild/guildManager');
 
 async function safeReply(interaction, content) {
@@ -28,23 +29,6 @@ async function safeUpdate(interaction, payload) {
   return true;
 }
 
-async function safeNativeRoleUpdate(interaction, payload) {
-  const cleanPayload = withoutReplyFlags(payload);
-  if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
-
-  if (interaction.webhook?.editMessage && interaction.message?.id) {
-    await interaction.webhook.editMessage(interaction.message.id, cleanPayload);
-    return true;
-  }
-
-  if (interaction.message?.edit) {
-    await interaction.message.edit(cleanPayload);
-    return true;
-  }
-
-  throw new Error('The management role panel could not be refreshed. Please reopen Suggestions and try again.');
-}
-
 function withoutReplyFlags(payload = {}) {
   const { flags, ephemeral, ...rest } = payload;
   return rest;
@@ -59,6 +43,15 @@ async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestion
   });
 }
 
+async function refreshManagementRoleCache(guild) {
+  if (!guild?.roles?.fetch) throw new Error('The server role list could not be loaded.');
+  try {
+    await guild.roles.fetch();
+  } catch (error) {
+    throw new Error(`The complete server role list could not be loaded: ${error.message || 'Please try again.'}`);
+  }
+}
+
 async function handleSuggestionsAdminInteraction(interaction) {
   const id = String(interaction?.customId || '');
   if (!id.startsWith('admin:suggestions')) return false;
@@ -71,17 +64,32 @@ async function handleSuggestionsAdminInteraction(interaction) {
   const save = (updater) => suggestions.updateSection(interaction.guild.id, updater, interaction.guild);
 
   try {
-    if (id === 'admin:suggestions:reviewerRoles' && interaction.isRoleSelectMenu?.()) {
-      const reviewerRoleIds = [...new Set((interaction.values || []).map(String).filter(Boolean))].slice(0, 25);
-      save((current) => ({ ...current, reviewerRoleIds }));
-      return safeNativeRoleUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName));
+    const rolePicker = panelNavigation.parseRolePickerId(id);
+    if (rolePicker?.baseId === 'admin:suggestions:reviewerRoles') {
+      await refreshManagementRoleCache(interaction.guild);
+
+      if (rolePicker.kind === 'select' && interaction.isStringSelectMenu?.()) {
+        const section = suggestions.getSection(interaction.guild.id);
+        const reviewerRoleIds = panelNavigation.mergeRolePickerSelection(
+          interaction.guild,
+          section.reviewerRoleIds,
+          interaction.values || [],
+          rolePicker.page,
+        );
+        save((current) => ({ ...current, reviewerRoleIds }));
+        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+      }
+      if (rolePicker.kind === 'page' && interaction.isButton?.()) {
+        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+      }
     }
 
     if (id === 'admin:suggestions' || id === 'admin:suggestions:overview') {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
     }
     if (id === 'admin:suggestions:reviewers') {
-      return safeNativeRoleUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName));
+      await refreshManagementRoleCache(interaction.guild);
+      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'reviewers'));
     }
     if (id === 'admin:suggestions:destinations') {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'destinations'));
@@ -202,6 +210,7 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
+    // Legacy public management button support for messages created before the managed workflow update.
     if (interaction.isButton?.() && parts[1] === 'reviewOpen') {
       const suggestionId = suggestions.cleanSuggestionId(parts[2]);
       if (!suggestionId) throw new Error('That review option is no longer available.');
@@ -219,6 +228,7 @@ async function handleSuggestionsInteraction(interaction) {
       return true;
     }
 
+    // Legacy approve/deny controls remain valid for old management messages.
     if (interaction.isButton?.() && parts[1] === 'review') {
       if (!suggestions.cleanSuggestionId(parts[2]) || !['approve', 'deny'].includes(parts[3])) throw new Error('That review action is no longer available.');
       const section = tracking.assertEnabled(interaction.guildId);
