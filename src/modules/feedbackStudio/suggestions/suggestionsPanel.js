@@ -10,6 +10,7 @@ const {
   TextInputStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
+  RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
   MessageFlags,
 } = require('discord.js');
@@ -17,7 +18,6 @@ const suggestions = require('./suggestions');
 const tracking = require('./suggestionsTracking');
 const embedTemplates = require('../../messageStudio/embed/embedTemplates');
 const { isModuleEnabled } = require('../../../core/guild/guildManager');
-const panelNavigation = require('../../../core/ui/panelNavigation');
 
 const SUGGESTIONS_COLOR = 0xfee75c;
 const row = (...components) => new ActionRowBuilder().addComponents(...components);
@@ -352,22 +352,30 @@ function overviewDescription(section, enabled) {
   ].join('\n');
 }
 
-function buildReviewerRolesPanel(guild, memberDisplayName = 'Unknown User', page = 0) {
+function buildReviewerRolesPanel(guild, memberDisplayName = 'Unknown User') {
   const section = suggestions.getSection(guild.id);
-  const picker = panelNavigation.buildRolePicker(guild, { customId: 'admin:suggestions:reviewerRoles', placeholder: 'Choose management roles', selectedIds: section.reviewerRoleIds, minValues: 0, maxValues: 25, page, pagination: true, showManaged: true });
+  const reviewerRoleIds = Array.isArray(section.reviewerRoleIds)
+    ? [...new Set(section.reviewerRoleIds.map(String).filter(Boolean))].slice(0, 25)
+    : [];
+  const rolePicker = new RoleSelectMenuBuilder()
+    .setCustomId('admin:suggestions:reviewerRoles')
+    .setPlaceholder('Choose management roles')
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (reviewerRoleIds.length) rolePicker.setDefaultRoles(...reviewerRoleIds);
   const embed = new EmbedBuilder().setColor(SUGGESTIONS_COLOR).setTitle('💡 Suggestions · Management Team').setDescription([
-    'Choose which roles can discuss, approve, decline and mark suggestions as implemented.', '',
-    'Roles are shown from **highest to lowest** in the server hierarchy. You can select roles across multiple pages.', '',
+    'Choose which server roles can discuss, approve, decline and mark suggestions as implemented.', '',
+    'Discord will show the server roles available to choose from.', '',
     `**Selected roles:** ${formatRoles(section.reviewerRoleIds)}`, '',
     'Members with **Manage Server** or **Administrator** can always manage suggestions.',
   ].join('\n')).setFooter({ text: `Opened by ${memberDisplayName}` }).setTimestamp();
-  return { embeds: [embed], components: [...picker.rows, row(button('admin:suggestions:overview', '⬅️ Back to Suggestions', ButtonStyle.Secondary))] };
+  return { embeds: [embed], components: [row(rolePicker), row(button('admin:suggestions:overview', '⬅️ Back to Suggestions', ButtonStyle.Secondary))] };
 }
 
 function buildSuggestionsAdminPanel(guild, memberDisplayName = 'Unknown User', page = 'overview') {
   const section = suggestions.getSection(guild.id);
   const enabled = isModuleEnabled(guild.id, 'suggestions');
-  if (page === 'reviewers') return buildReviewerRolesPanel(guild, memberDisplayName, 0);
+  if (page === 'reviewers') return buildReviewerRolesPanel(guild, memberDisplayName);
   if (page === 'destinations') {
     const embed = new EmbedBuilder().setColor(SUGGESTIONS_COLOR).setTitle('💡 Suggestions · Outcome & Log Channels').setDescription([
       'Choose where final outcomes and management audit logs are posted.', '',
