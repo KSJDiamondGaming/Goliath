@@ -66,6 +66,7 @@ function buildPanel(guild, memberDisplayName = 'Unknown User') {
     .setTimestamp();
 
   return {
+    content: null,
     embeds: [embed],
     components: [
       row(new ChannelSelectMenuBuilder()
