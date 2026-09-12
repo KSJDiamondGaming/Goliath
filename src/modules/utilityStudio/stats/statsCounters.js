@@ -49,6 +49,10 @@ function cleanType(value) {
   return type;
 }
 
+function cleanChannelType(value) {
+  return String(value || '').toLowerCase() === 'text' ? 'text' : 'voice';
+}
+
 function defaultTemplate(type) {
   const templates = {
     channels: '📁 Channels: {value}',
@@ -88,7 +92,7 @@ function normalizeCounterOptions(type, options = {}) {
 
   if (type === 'countdown') {
     const timestamp = Number(input.timestamp || 0);
-    clean.timestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+    clean.timestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now() + 86400000;
     clean.includeDays = input.includeDays !== false;
     clean.includeHours = input.includeHours !== false;
     clean.includeMinutes = input.includeMinutes !== false;
@@ -165,6 +169,7 @@ function cleanDock(input = {}) {
     id: safeString(input.id, 40) || channelId || `dock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     channelId: validId(channelId) ? channelId : null,
     categoryId: validId(input.categoryId) ? String(input.categoryId) : null,
+    channelType: cleanChannelType(input.channelType),
     name: safeString(input.name || 'Counter', 60) || 'Counter',
     enabled: input.enabled !== false,
     template,
@@ -396,11 +401,15 @@ async function createCounterChannel(guild, input, parentId = null) {
   const dock = cleanDock(input);
   const summary = statsStore.getSummary(guild.id);
   const name = renderCounterName(guild, summary, dock);
+  const isText = dock.channelType === 'text';
   return guild.channels.create({
     name,
-    type: ChannelType.GuildVoice,
+    type: isText ? ChannelType.GuildText : ChannelType.GuildVoice,
     parent: parentId || dock.categoryId || undefined,
-    permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.Connect] }],
+    permissionOverwrites: [{
+      id: guild.roles.everyone.id,
+      deny: [isText ? PermissionFlagsBits.SendMessages : PermissionFlagsBits.Connect],
+    }],
     reason: 'Goliath Stats counter setup',
   });
 }
@@ -420,7 +429,16 @@ async function createDock(guild, input = {}, guildOrMeta = {}) {
 async function updateDock(guild, id, changes = {}, guildOrMeta = {}) {
   const existing = listCounters(guild.id).find((item) => item.id === id || item.channelId === id);
   if (!existing) throw new Error('Counter not found.');
-  const next = cleanDock({ ...existing, ...changes, id: existing.id, channelId: existing.channelId, segments: changes.segments || existing.segments });
+  let next = cleanDock({ ...existing, ...changes, id: existing.id, channelId: existing.channelId, segments: changes.segments || existing.segments });
+
+  if (existing.channelId && existing.channelType !== next.channelType) {
+    const oldChannel = guild.channels.cache.get(existing.channelId) || await guild.channels.fetch(existing.channelId).catch(() => null);
+    const parentId = oldChannel?.parentId || existing.categoryId || null;
+    if (oldChannel?.deletable) await oldChannel.delete('Goliath Stats counter channel type changed').catch(() => null);
+    const replacement = await createCounterChannel(guild, { ...next, channelId: null }, parentId);
+    next = { ...next, channelId: replacement.id, categoryId: parentId || next.categoryId };
+  }
+
   saveDock(guild.id, next, guildOrMeta || guild);
   await refreshCounters(guild);
   return next;
@@ -480,6 +498,7 @@ async function createCounterSuite(guild, options = {}) {
       template: preset.template,
       segments: [{ type: preset.type, options: preset.options || {} }],
       categoryId: category.id,
+      channelType: options.channelType || 'voice',
       source: 'default-suite',
     }, guild);
     created.push(dock);
