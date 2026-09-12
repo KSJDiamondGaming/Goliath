@@ -1,6 +1,6 @@
 'use strict';
 
-const { MessageFlags } = require('discord.js');
+const { MessageFlags, Routes } = require('discord.js');
 const suggestions = require('./suggestions');
 const panel = require('./suggestionsPanel');
 const tracking = require('./suggestionsTracking');
@@ -44,22 +44,38 @@ async function refreshLiveSuggestionUi(guild, { panelMessage = false, suggestion
 }
 
 async function refreshManagementRoleCache(guild) {
-  if (!guild?.roles?.fetch || !guild?.roles?.cache) throw new Error('The server role list could not be loaded.');
-  let fetched;
+  if (!guild?.client?.rest || !guild?.roles) throw new Error('The server role list could not be loaded.');
+
+  let rawRoles;
   try {
-    fetched = await guild.roles.fetch();
+    rawRoles = await guild.client.rest.get(Routes.guildRoles(guild.id));
   } catch (error) {
-    throw new Error(`The complete server role list could not be loaded: ${error.message || 'Please try again.'}`);
+    throw new Error(`The complete server role list could not be loaded from Discord: ${error.message || 'Please try again.'}`);
   }
 
-  if (!fetched?.size) throw new Error('Discord returned an empty server role list.');
-  for (const [roleId, role] of fetched.entries()) guild.roles.cache.set(roleId, role);
+  if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error('Discord returned an empty server role list.');
+  if (typeof guild.roles._add !== 'function') throw new Error('The server role manager could not prepare the role list.');
 
-  if (guild.roles.cache.size < fetched.size) {
-    throw new Error(`Only ${guild.roles.cache.size} of ${fetched.size} server roles were loaded.`);
-  }
+  for (const rawRole of rawRoles) guild.roles._add(rawRole, true);
 
-  return fetched;
+  const loaded = rawRoles.filter((role) => String(role?.id || '') !== String(guild.id));
+  if (!loaded.length) throw new Error('Discord did not return any selectable server roles.');
+
+  return loaded;
+}
+
+function buildManagementRolePanelPayload(guild, memberName, page = 0, loadedCount = null) {
+  const pageCount = panelNavigation.rolePickerPageCount(guild);
+  const safePage = Math.min(Math.max(0, Number(page) || 0), pageCount - 1);
+  const payload = panel.buildReviewerRolesPanel(guild, memberName, safePage);
+  const count = Number.isFinite(Number(loadedCount))
+    ? Number(loadedCount)
+    : panelNavigation.guildRolesByHierarchy(guild).length;
+
+  return {
+    ...payload,
+    content: `🔎 Roles loaded: **${count}** · Page **${safePage + 1}/${pageCount}**`,
+  };
 }
 
 async function handleSuggestionsAdminInteraction(interaction) {
@@ -76,7 +92,7 @@ async function handleSuggestionsAdminInteraction(interaction) {
   try {
     const rolePicker = panelNavigation.parseRolePickerId(id);
     if (rolePicker?.baseId === 'admin:suggestions:reviewerRoles') {
-      await refreshManagementRoleCache(interaction.guild);
+      const loadedRoles = await refreshManagementRoleCache(interaction.guild);
 
       if (rolePicker.kind === 'select' && interaction.isStringSelectMenu?.()) {
         const section = suggestions.getSection(interaction.guild.id);
@@ -87,10 +103,16 @@ async function handleSuggestionsAdminInteraction(interaction) {
           rolePicker.page,
         );
         save((current) => ({ ...current, reviewerRoleIds }));
-        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+        return safeUpdate(
+          interaction,
+          buildManagementRolePanelPayload(interaction.guild, memberName, rolePicker.page, loadedRoles.length),
+        );
       }
       if (rolePicker.kind === 'page' && interaction.isButton?.()) {
-        return safeUpdate(interaction, panel.buildReviewerRolesPanel(interaction.guild, memberName, rolePicker.page));
+        return safeUpdate(
+          interaction,
+          buildManagementRolePanelPayload(interaction.guild, memberName, rolePicker.page, loadedRoles.length),
+        );
       }
     }
 
@@ -98,8 +120,11 @@ async function handleSuggestionsAdminInteraction(interaction) {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'overview'));
     }
     if (id === 'admin:suggestions:reviewers') {
-      await refreshManagementRoleCache(interaction.guild);
-      return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'reviewers'));
+      const loadedRoles = await refreshManagementRoleCache(interaction.guild);
+      return safeUpdate(
+        interaction,
+        buildManagementRolePanelPayload(interaction.guild, memberName, 0, loadedRoles.length),
+      );
     }
     if (id === 'admin:suggestions:destinations') {
       return safeUpdate(interaction, panel.buildSuggestionsAdminPanel(interaction.guild, memberName, 'destinations'));
